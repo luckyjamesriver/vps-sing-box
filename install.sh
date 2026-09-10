@@ -91,25 +91,34 @@ install_dependencies() {
     info "基础依赖安装完成。"
 }
 
-# --- Enable Linux BBR ---
+# --- Enable Linux BBR and TCP Brutal ---
 enable_bbr() {
     info "检查并配置原生 Linux BBR 拥塞控制算法..."
     if sysctl net.ipv4.tcp_congestion_control | grep -q bbr; then
         info "系统已启用 BBR 加速。"
-        return 0
+    else
+        sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
+        sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
+        echo "net.core.default_qdisc = fq" >> /etc/sysctl.conf
+        echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf
+        sysctl -p >/dev/null 2>&1 || true
+        if sysctl net.ipv4.tcp_congestion_control | grep -q bbr; then
+            info "BBR 拥塞控制已成功激活！"
+        else
+            warn "BBR 激活可能需要重启内核生效，已写入配置文件。"
+        fi
     fi
 
-    sed -i "/net.core.default_qdisc/d" /etc/sysctl.conf
-    sed -i "/net.ipv4.tcp_congestion_control/d" /etc/sysctl.conf
-
-    echo "net.core.default_qdisc = fq" >> /etc/sysctl.conf
-    echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf
-    sysctl -p >/dev/null 2>&1 || true
-
-    if sysctl net.ipv4.tcp_congestion_control | grep -q bbr; then
-        info "BBR 拥塞控制已成功激活！"
-    else
-        warn "BBR 激活可能需要重启内核生效，已写入配置文件。"
+    # Install TCP Brutal kernel module for VLESS TCP Brutal acceleration
+    info "检查并安装 Linux TCP Brutal 拥塞控制内核模块..."
+    if ! lsmod | grep -q "tcp_brutal"; then
+        info "正在执行 TCP Brutal 官方内核模块安装脚本 (https://tcp.hy2.sh/)..."
+        bash <(curl -fsSL https://tcp.hy2.sh/) || {
+            warn "TCP Brutal 内核模块自动安装未完成，建议使用 Linux 5.8+ 内核。"
+        }
+    fi
+    if lsmod | grep -q "tcp_brutal"; then
+        info "TCP Brutal 内核模块已加载！"
     fi
 }
 
@@ -232,6 +241,11 @@ allow_ports() {
 generate_configs() {
     local domain="$1"
     local public_ip="$2"
+    local server_up_mbps="${3:-50}"
+    local server_down_mbps="${4:-500}"
+
+    local client_up_mbps="${server_down_mbps}"
+    local client_down_mbps="${server_up_mbps}"
 
     title "正在生成专属随机高强度凭证与端口"
 
@@ -246,10 +260,10 @@ generate_configs() {
     port_tuic=$(get_random_port)
 
     info "分配端口 (已避开常用端口):"
-    echo -e "  - VLESS-Reality-Vision (TCP) : ${GREEN}${port_reality_tcp}${PLAIN}"
-    echo -e "  - VLESS-Reality-gRPC   (TCP) : ${GREEN}${port_reality_grpc}${PLAIN}"
-    echo -e "  - Hysteria 2           (UDP) : ${GREEN}${port_hy2}${PLAIN}"
-    echo -e "  - TUIC v5              (UDP) : ${GREEN}${port_tuic}${PLAIN}"
+    echo -e "  - VLESS-Reality (TCP Brutal) : ${GREEN}${port_reality_tcp}${PLAIN}"
+    echo -e "  - VLESS-Reality-gRPC (TCP)   : ${GREEN}${port_reality_grpc}${PLAIN}"
+    echo -e "  - Hysteria 2         (UDP)   : ${GREEN}${port_hy2}${PLAIN}"
+    echo -e "  - TUIC v5            (UDP)   : ${GREEN}${port_tuic}${PLAIN}"
 
     allow_ports "${port_reality_tcp}" "${port_reality_grpc}" "${port_hy2}" "${port_tuic}"
 
@@ -272,6 +286,8 @@ generate_configs() {
     hy2_password=$(openssl rand -hex 16)
     local tuic_password
     tuic_password=$(openssl rand -hex 16)
+    local salamander_pwd
+    salamander_pwd=$(openssl rand -hex 8)
 
     # Reality Camouflage SNI
     local reality_sni="www.apple.com"
@@ -279,36 +295,51 @@ generate_configs() {
     # Generate Cert for Hy2 & Tuic
     generate_cert "${domain}"
 
-    # 1. Server Configuration
+    # 1. Server Configuration (No DNS block, TCP Brutal on VLESS, CN Geosite Rule-set Block)
     cat > "${CONFIG_FILE}" <<EOF
 {
   "log": {
+    "disabled": false,
     "level": "info",
     "timestamp": true
   },
-  "dns": {
-    "servers": [
-      {
-        "tag": "dns-local",
-        "type": "local"
-      },
-      {
-        "tag": "dns-remote",
-        "type": "udp",
-        "server": "1.1.1.1"
-      }
-    ]
-  },
   "inbounds": [
     {
+      "type": "hysteria2",
+      "listen": "::",
+      "listen_port": ${port_hy2},
+      "up_mbps": ${server_up_mbps},
+      "down_mbps": ${server_down_mbps},
+      "users": [
+        {
+          "name": "singbox_hysteria2",
+          "password": "${hy2_password}"
+        }
+      ],
+      "obfs": {
+        "type": "salamander",
+        "password": "${salamander_pwd}"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "${domain}",
+        "alpn": [
+          "h3"
+        ],
+        "certificate_path": "${CERT_PEM}",
+        "key_path": "${CERT_KEY}"
+      }
+    },
+    {
       "type": "vless",
-      "tag": "vless-reality-vision-in",
+      "tag": "VLESSReality",
       "listen": "::",
       "listen_port": ${port_reality_tcp},
       "users": [
         {
+          "name": "VLESS_Reality_Brutal",
           "uuid": "${uuid}",
-          "flow": "xtls-rprx-vision"
+          "flow": ""
         }
       ],
       "tls": {
@@ -322,18 +353,29 @@ generate_configs() {
           },
           "private_key": "${private_key}",
           "short_id": [
+            "",
             "${short_id}"
           ]
+        }
+      },
+      "multiplex": {
+        "enabled": true,
+        "padding": false,
+        "brutal": {
+          "enabled": true,
+          "up_mbps": ${server_up_mbps},
+          "down_mbps": ${server_down_mbps}
         }
       }
     },
     {
       "type": "vless",
-      "tag": "vless-reality-grpc-in",
+      "tag": "VLESSRealityGRPC",
       "listen": "::",
       "listen_port": ${port_reality_grpc},
       "users": [
         {
+          "name": "VLESS_Reality_gRPC",
           "uuid": "${uuid}"
         }
       ],
@@ -348,6 +390,7 @@ generate_configs() {
           },
           "private_key": "${private_key}",
           "short_id": [
+            "",
             "${short_id}"
           ]
         }
@@ -358,29 +401,13 @@ generate_configs() {
       }
     },
     {
-      "type": "hysteria2",
-      "tag": "hysteria2-in",
-      "listen": "::",
-      "listen_port": ${port_hy2},
-      "users": [
-        {
-          "password": "${hy2_password}"
-        }
-      ],
-      "ignore_client_bandwidth": false,
-      "tls": {
-        "enabled": true,
-        "certificate_path": "${CERT_PEM}",
-        "key_path": "${CERT_KEY}"
-      }
-    },
-    {
       "type": "tuic",
-      "tag": "tuic-in",
+      "tag": "singbox-tuic-in",
       "listen": "::",
       "listen_port": ${port_tuic},
       "users": [
         {
+          "name": "singbox_tuic",
           "uuid": "${uuid}",
           "password": "${tuic_password}"
         }
@@ -388,6 +415,10 @@ generate_configs() {
       "congestion_control": "bbr",
       "tls": {
         "enabled": true,
+        "server_name": "${domain}",
+        "alpn": [
+          "h3"
+        ],
         "certificate_path": "${CERT_PEM}",
         "key_path": "${CERT_KEY}"
       }
@@ -396,30 +427,47 @@ generate_configs() {
   "outbounds": [
     {
       "type": "direct",
-      "tag": "direct"
+      "tag": "01_direct_outbound"
     },
     {
       "type": "block",
-      "tag": "block"
+      "tag": "cn_block_outbound"
     }
   ],
   "route": {
-    "default_domain_resolver": "dns-remote",
     "rules": [
       {
         "protocol": "bittorrent",
-        "outbound": "block"
+        "outbound": "cn_block_outbound"
       },
       {
-        "ip_is_private": true,
-        "outbound": "block"
+        "domain_regex": [
+          "^([a-zA-Z0-9_-]+\\.)*googleapis\\.cn",
+          "^([a-zA-Z0-9_-]+\\.)*googleapis\\.com",
+          "^([a-zA-Z0-9_-]+\\.)*gstatic\\.com",
+          "^([a-zA-Z0-9_-]+\\.)*xn--ngstr-lra8j\\.com"
+        ],
+        "outbound": "01_direct_outbound"
+      },
+      {
+        "rule_set": "cn_cn_block_route",
+        "outbound": "cn_block_outbound"
+      }
+    ],
+    "rule_set": [
+      {
+        "type": "remote",
+        "tag": "cn_cn_block_route",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
+        "download_detour": "01_direct_outbound"
       }
     ]
   }
 }
 EOF
 
-    # 2. Client Complete Configuration (JSON for Sing-box Client)
+    # 2. Client Complete Configuration (Matched Bandwidth Values, Brutal, Salamander OBFS)
     cat > "${CLIENT_FILE}" <<EOF
 {
   "log": {
@@ -452,19 +500,19 @@ EOF
       "type": "selector",
       "tag": "select",
       "outbounds": [
-        "VLESS-Reality-Vision",
+        "VLESS-Reality-Brutal",
         "VLESS-Reality-gRPC",
         "Hysteria2",
         "TUIC-v5",
         "auto"
       ],
-      "default": "VLESS-Reality-Vision"
+      "default": "VLESS-Reality-Brutal"
     },
     {
       "type": "urltest",
       "tag": "auto",
       "outbounds": [
-        "VLESS-Reality-Vision",
+        "VLESS-Reality-Brutal",
         "VLESS-Reality-gRPC",
         "Hysteria2",
         "TUIC-v5"
@@ -475,12 +523,10 @@ EOF
     },
     {
       "type": "vless",
-      "tag": "VLESS-Reality-Vision",
+      "tag": "VLESS-Reality-Brutal",
       "server": "${domain}",
       "server_port": ${port_reality_tcp},
       "uuid": "${uuid}",
-      "flow": "xtls-rprx-vision",
-      "network": "tcp",
       "tls": {
         "enabled": true,
         "server_name": "${reality_sni}",
@@ -492,6 +538,19 @@ EOF
           "enabled": true,
           "public_key": "${public_key}",
           "short_id": "${short_id}"
+        }
+      },
+      "packet_encoding": "xudp",
+      "multiplex": {
+        "enabled": true,
+        "protocol": "h2mux",
+        "max_connections": 1,
+        "min_streams": 4,
+        "padding": false,
+        "brutal": {
+          "enabled": true,
+          "up_mbps": ${client_up_mbps},
+          "down_mbps": ${client_down_mbps}
         }
       }
     },
@@ -525,10 +584,19 @@ EOF
       "tag": "Hysteria2",
       "server": "${domain}",
       "server_port": ${port_hy2},
+      "up_mbps": ${client_up_mbps},
+      "down_mbps": ${client_down_mbps},
       "password": "${hy2_password}",
+      "obfs": {
+        "type": "salamander",
+        "password": "${salamander_pwd}"
+      },
       "tls": {
         "enabled": true,
         "server_name": "${domain}",
+        "alpn": [
+          "h3"
+        ],
         "insecure": true
       }
     },
@@ -543,6 +611,9 @@ EOF
       "tls": {
         "enabled": true,
         "server_name": "${domain}",
+        "alpn": [
+          "h3"
+        ],
         "insecure": true
       }
     },
@@ -589,8 +660,13 @@ EOF
   "port_reality_grpc": ${port_reality_grpc},
   "port_hy2": ${port_hy2},
   "hy2_password": "${hy2_password}",
+  "salamander_pwd": "${salamander_pwd}",
   "port_tuic": ${port_tuic},
-  "tuic_password": "${tuic_password}"
+  "tuic_password": "${tuic_password}",
+  "server_up_mbps": ${server_up_mbps},
+  "server_down_mbps": ${server_down_mbps},
+  "client_up_mbps": ${client_up_mbps},
+  "client_down_mbps": ${client_down_mbps}
 }
 EOF
 
@@ -622,7 +698,8 @@ show_nodes() {
     fi
 
     local domain public_ip uuid reality_sni public_key short_id
-    local port_reality_tcp port_reality_grpc port_hy2 hy2_password port_tuic tuic_password
+    local port_reality_tcp port_reality_grpc port_hy2 hy2_password salamander_pwd port_tuic tuic_password
+    local server_up_mbps server_down_mbps client_up_mbps client_down_mbps
 
     domain=$(jq -r ".domain" "${INFO_FILE}")
     public_ip=$(jq -r ".public_ip" "${INFO_FILE}")
@@ -634,32 +711,38 @@ show_nodes() {
     port_reality_grpc=$(jq -r ".port_reality_grpc" "${INFO_FILE}")
     port_hy2=$(jq -r ".port_hy2" "${INFO_FILE}")
     hy2_password=$(jq -r ".hy2_password" "${INFO_FILE}")
+    salamander_pwd=$(jq -r ".salamander_pwd" "${INFO_FILE}")
     port_tuic=$(jq -r ".port_tuic" "${INFO_FILE}")
     tuic_password=$(jq -r ".tuic_password" "${INFO_FILE}")
+    server_up_mbps=$(jq -r ".server_up_mbps" "${INFO_FILE}")
+    server_down_mbps=$(jq -r ".server_down_mbps" "${INFO_FILE}")
+    client_up_mbps=$(jq -r ".client_up_mbps" "${INFO_FILE}")
+    client_down_mbps=$(jq -r ".client_down_mbps" "${INFO_FILE}")
 
     # Standard Share Links
-    local uri_reality_tcp="vless://${uuid}@${domain}:${port_reality_tcp}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${reality_sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp#VLESS-Reality-Vision"
+    local uri_reality_tcp="vless://${uuid}@${domain}:${port_reality_tcp}?encryption=none&security=reality&sni=${reality_sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp#VLESS-Reality-Brutal"
     local uri_reality_grpc="vless://${uuid}@${domain}:${port_reality_grpc}?encryption=none&security=reality&sni=${reality_sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=grpc&serviceName=grpc-service#VLESS-Reality-gRPC"
-    local uri_hy2="hysteria2://${hy2_password}@${domain}:${port_hy2}/?insecure=1&sni=${domain}#Hysteria2"
+    local uri_hy2="hysteria2://${hy2_password}@${domain}:${port_hy2}/?insecure=1&sni=${domain}&obfs=salamander&obfs-password=${salamander_pwd}#Hysteria2"
     local uri_tuic="tuic://${uuid}:${tuic_password}@${domain}:${port_tuic}?congestion_control=bbr&alpn=h3&sni=${domain}&allow_insecure=1#TUIC-v5"
 
     title "Sing-box 专属节点与连接链接"
     echo -e "${YELLOW}绑定域名:${PLAIN} ${domain}  |  ${YELLOW}VPS 公网 IP:${PLAIN} ${public_ip}"
+    echo -e "${YELLOW}带宽限量设置:${PLAIN} 服务端上行 ${server_up_mbps} Mbps, 下行 ${server_down_mbps} Mbps | 客户端对应上行 ${client_up_mbps} Mbps, 下行 ${client_down_mbps} Mbps"
     echo -e "${YELLOW}客户端配置文件:${PLAIN} ${CLIENT_FILE}\n"
 
-    echo -e "${GREEN}1. VLESS-Reality-Vision (TCP 主力抗封锁):${PLAIN}"
+    echo -e "${GREEN}1. VLESS-Reality (TCP Brutal 强力拥塞控制):${PLAIN}"
     echo -e "   ${BLUE}${uri_reality_tcp}${PLAIN}\n"
 
     echo -e "${GREEN}2. VLESS-Reality-gRPC (TCP 多路复用备用):${PLAIN}"
     echo -e "   ${BLUE}${uri_reality_grpc}${PLAIN}\n"
 
-    echo -e "${GREEN}3. Hysteria 2 (UDP 晚高峰暴力加速):${PLAIN}"
+    echo -e "${GREEN}3. Hysteria 2 (UDP 晚高峰暴力加速, 含 Salamander 混淆):${PLAIN}"
     echo -e "   ${BLUE}${uri_hy2}${PLAIN}\n"
 
     echo -e "${GREEN}4. TUIC v5 (UDP 0-RTT 极速 QUIC):${PLAIN}"
     echo -e "   ${BLUE}${uri_tuic}${PLAIN}\n"
 
-    title "VLESS-Reality-Vision 二维码 (手机扫码即可导入)"
+    title "VLESS-Reality (TCP Brutal) 二维码 (手机扫码即可导入)"
     qrencode -t ANSIUTF8 "${uri_reality_tcp}" || true
 
     echo -e "\n${YELLOW}提示:${PLAIN} 随时输入快捷管理命令 ${GREEN}sb${PLAIN} 即可唤出管理菜单！"
@@ -768,8 +851,16 @@ install_flow() {
         warn "域名不能为空，请重新输入！"
     done
 
+    title "配置 TCP Brutal 与带宽限速参数"
+    echo -e "提示: 服务端上行对应客户端下行，服务端下行对应客户端上行。"
+    read -r -p "请输入 VPS 上行带宽限制 up_mbps [回车默认 50]: " input_up
+    local server_up_mbps="${input_up:-50}"
+    read -r -p "请输入 VPS 下行带宽限制 down_mbps [回车默认 500]: " input_down
+    local server_down_mbps="${input_down:-500}"
+    info "设定带宽限制: VPS 上行 ${server_up_mbps} Mbps / 下行 ${server_down_mbps} Mbps"
+
     install_singbox_core
-    generate_configs "${user_domain}" "${public_ip}"
+    generate_configs "${user_domain}" "${public_ip}" "${server_up_mbps}" "${server_down_mbps}"
     start_service
     setup_shortcut
 
