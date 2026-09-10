@@ -480,10 +480,10 @@ generate_configs() {
       },
       {
         "domain_regex": [
-          "^([a-zA-Z0-9_-]+\\.)*googleapis\\.cn",
-          "^([a-zA-Z0-9_-]+\\.)*googleapis\\.com",
-          "^([a-zA-Z0-9_-]+\\.)*gstatic\\.com",
-          "^([a-zA-Z0-9_-]+\\.)*xn--ngstr-lra8j\\.com"
+          "^([a-zA-Z0-9_-]+\\\\.)*googleapis\\\\.cn",
+          "^([a-zA-Z0-9_-]+\\\\.)*googleapis\\\\.com",
+          "^([a-zA-Z0-9_-]+\\\\.)*gstatic\\\\.com",
+          "^([a-zA-Z0-9_-]+\\\\.)*xn--ngstr-lra8j\\\\.com"
         ],
         "outbound": "01_direct_outbound"
       },
