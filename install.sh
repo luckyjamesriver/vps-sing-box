@@ -243,23 +243,82 @@ generate_configs() {
     local public_ip="$2"
     local server_up_mbps="${3:-50}"
     local server_down_mbps="${4:-500}"
+    local is_reuse="${5:-false}"
 
     local client_up_mbps="${server_down_mbps}"
     local client_down_mbps="${server_up_mbps}"
 
-    title "正在生成专属随机高强度凭证与端口"
+    title "正在配置专属高强度凭证与端口"
 
-    local port_reality_tcp
-    local port_reality_grpc
-    local port_hy2
-    local port_tuic
+    local port_reality_tcp=""
+    local port_reality_grpc=""
+    local port_hy2=""
+    local port_tuic=""
+    local uuid=""
+    local private_key=""
+    local public_key=""
+    local short_id=""
+    local hy2_password=""
+    local tuic_password=""
+    local salamander_pwd=""
+    local reality_sni="www.apple.com"
 
-    port_reality_tcp=$(get_random_port)
-    port_reality_grpc=$(get_random_port)
-    port_hy2=$(get_random_port)
-    port_tuic=$(get_random_port)
+    if [[ "${is_reuse}" == "true" ]]; then
+        info "正在读取已存在的凭证与端口..."
+        if [[ -f "${INFO_FILE}" ]]; then
+            port_reality_tcp=$(jq -r '.port_reality_tcp // empty' "${INFO_FILE}")
+            port_reality_grpc=$(jq -r '.port_reality_grpc // empty' "${INFO_FILE}")
+            port_hy2=$(jq -r '.port_hy2 // empty' "${INFO_FILE}")
+            port_tuic=$(jq -r '.port_tuic // empty' "${INFO_FILE}")
+            uuid=$(jq -r '.uuid // empty' "${INFO_FILE}")
+            private_key=$(jq -r '.private_key // empty' "${INFO_FILE}")
+            public_key=$(jq -r '.public_key // empty' "${INFO_FILE}")
+            short_id=$(jq -r '.short_id // empty' "${INFO_FILE}")
+            hy2_password=$(jq -r '.hy2_password // empty' "${INFO_FILE}")
+            tuic_password=$(jq -r '.tuic_password // empty' "${INFO_FILE}")
+            salamander_pwd=$(jq -r '.salamander_pwd // empty' "${INFO_FILE}")
+            reality_sni=$(jq -r '.reality_sni // "www.apple.com"' "${INFO_FILE}")
+        fi
 
-    info "分配端口 (已避开常用端口):"
+        if [[ -f "${CONFIG_FILE}" ]]; then
+            [[ -z "${uuid}" ]] && uuid=$(jq -r '.inbounds[] | select(.type=="vless") | .users[0].uuid' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+            [[ -z "${private_key}" ]] && private_key=$(jq -r '.inbounds[] | select(.type=="vless") | .tls.reality.private_key' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+            [[ -z "${short_id}" ]] && short_id=$(jq -r '.inbounds[] | select(.type=="vless") | .tls.reality.short_id[-1]' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+            [[ -z "${port_reality_tcp}" ]] && port_reality_tcp=$(jq -r '.inbounds[] | select(.tag=="VLESSReality" or .tag=="vless-reality-vision-in") | .listen_port' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+            [[ -z "${port_reality_grpc}" ]] && port_reality_grpc=$(jq -r '.inbounds[] | select(.tag=="VLESSRealityGRPC" or .tag=="vless-reality-grpc-in") | .listen_port' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+            [[ -z "${port_hy2}" ]] && port_hy2=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+            [[ -z "${port_tuic}" ]] && port_tuic=$(jq -r '.inbounds[] | select(.type=="tuic") | .listen_port' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+            [[ -z "${hy2_password}" ]] && hy2_password=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .users[0].password' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+            [[ -z "${tuic_password}" ]] && tuic_password=$(jq -r '.inbounds[] | select(.type=="tuic") | .users[0].password' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+            [[ -z "${salamander_pwd}" ]] && salamander_pwd=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .obfs.password // empty' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+        fi
+
+        if [[ -f "${CLIENT_FILE}" && -z "${public_key}" ]]; then
+            public_key=$(jq -r '.outbounds[] | select(.type=="vless") | .tls.reality.public_key' "${CLIENT_FILE}" 2>/dev/null | head -n 1)
+        fi
+    fi
+
+    # 兜底生成缺少的字段
+    [[ -z "${port_reality_tcp}" ]] && port_reality_tcp=$(get_random_port)
+    [[ -z "${port_reality_grpc}" ]] && port_reality_grpc=$(get_random_port)
+    [[ -z "${port_hy2}" ]] && port_hy2=$(get_random_port)
+    [[ -z "${port_tuic}" ]] && port_tuic=$(get_random_port)
+
+    [[ -z "${uuid}" ]] && uuid=$("${BIN_PATH}" generate uuid)
+
+    if [[ -z "${private_key}" || -z "${public_key}" ]]; then
+        local reality_keypair
+        reality_keypair=$("${BIN_PATH}" generate reality-keypair)
+        private_key=$(echo "${reality_keypair}" | awk '/PrivateKey:/ {print $2}')
+        public_key=$(echo "${reality_keypair}" | awk '/PublicKey:/ {print $2}')
+    fi
+
+    [[ -z "${short_id}" ]] && short_id=$(openssl rand -hex 8)
+    [[ -z "${hy2_password}" ]] && hy2_password=$(openssl rand -hex 16)
+    [[ -z "${tuic_password}" ]] && tuic_password=$(openssl rand -hex 16)
+    [[ -z "${salamander_pwd}" ]] && salamander_pwd=$(openssl rand -hex 8)
+
+    info "应用端口配置:"
     echo -e "  - VLESS-Reality (TCP Brutal) : ${GREEN}${port_reality_tcp}${PLAIN}"
     echo -e "  - VLESS-Reality-gRPC (TCP)   : ${GREEN}${port_reality_grpc}${PLAIN}"
     echo -e "  - Hysteria 2         (UDP)   : ${GREEN}${port_hy2}${PLAIN}"
@@ -267,33 +326,12 @@ generate_configs() {
 
     allow_ports "${port_reality_tcp}" "${port_reality_grpc}" "${port_hy2}" "${port_tuic}"
 
-    # Credentials
-    local uuid
-    uuid=$("${BIN_PATH}" generate uuid)
-
-    # Reality Keypair
-    local reality_keypair
-    reality_keypair=$("${BIN_PATH}" generate reality-keypair)
-    local private_key
-    private_key=$(echo "${reality_keypair}" | awk '/PrivateKey:/ {print $2}')
-    local public_key
-    public_key=$(echo "${reality_keypair}" | awk '/PublicKey:/ {print $2}')
-    local short_id
-    short_id=$(openssl rand -hex 8)
-
-    # Passwords for Hy2 & TUIC
-    local hy2_password
-    hy2_password=$(openssl rand -hex 16)
-    local tuic_password
-    tuic_password=$(openssl rand -hex 16)
-    local salamander_pwd
-    salamander_pwd=$(openssl rand -hex 8)
-
-    # Reality Camouflage SNI
-    local reality_sni="www.apple.com"
-
-    # Generate Cert for Hy2 & Tuic
-    generate_cert "${domain}"
+    # 证书处理：如果证书已存在且匹配域名则复用，否则重新生成
+    if [[ -f "${CERT_PEM}" && -f "${CERT_KEY}" ]] && openssl x509 -in "${CERT_PEM}" -text -noout 2>/dev/null | grep -q "${domain}"; then
+        info "复用已存在的 10 年自签 ECC 证书。"
+    else
+        generate_cert "${domain}"
+    fi
 
     # 1. Server Configuration (No DNS block, TCP Brutal on VLESS, CN Geosite Rule-set Block)
     cat > "${CONFIG_FILE}" <<EOF
@@ -654,6 +692,7 @@ EOF
   "public_ip": "${public_ip}",
   "uuid": "${uuid}",
   "reality_sni": "${reality_sni}",
+  "private_key": "${private_key}",
   "public_key": "${public_key}",
   "short_id": "${short_id}",
   "port_reality_tcp": ${port_reality_tcp},
@@ -837,30 +876,71 @@ install_flow() {
     local public_ip
     public_ip=$(get_public_ip)
 
-    title "配置 Cloudflare 域名"
-    echo -e "提示: 请确保你已经在 Cloudflare 将该域名解析到 VPS IP (${GREEN}${public_ip}${PLAIN})。"
-    echo -e "注意: 请保持 Cloudflare 上的代理状态为 ${YELLOW}仅限 DNS (灰色云朵)${PLAIN}。\n"
-
+    local is_reuse="false"
     local user_domain=""
-    while true; do
-        read -r -p "请输入你的域名 (如 node.yourdomain.com): " user_domain
-        user_domain=$(echo "${user_domain}" | tr -d "[:space:]")
-        if [[ -n "${user_domain}" ]]; then
-            break
+    local old_uuid=""
+    local old_up="50"
+    local old_down="500"
+
+    # 检测是否已存在历史配置
+    if [[ -f "${INFO_FILE}" || -f "${CONFIG_FILE}" ]]; then
+        if [[ -f "${INFO_FILE}" ]]; then
+            user_domain=$(jq -r '.domain // empty' "${INFO_FILE}")
+            old_uuid=$(jq -r '.uuid // empty' "${INFO_FILE}")
+            old_up=$(jq -r '.server_up_mbps // 50' "${INFO_FILE}")
+            old_down=$(jq -r '.server_down_mbps // 500' "${INFO_FILE}")
+        elif [[ -f "${CONFIG_FILE}" ]]; then
+            user_domain=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .tls.server_name // empty' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+            old_uuid=$(jq -r '.inbounds[] | select(.type=="vless") | .users[0].uuid // empty' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
         fi
-        warn "域名不能为空，请重新输入！"
-    done
+
+        if [[ -n "${old_uuid}" && "${old_uuid}" != "null" ]]; then
+            title "检测到已有安装记录"
+            echo -e "系统检测到原有配置:"
+            echo -e "  - 域名: ${GREEN}${user_domain}${PLAIN}"
+            echo -e "  - UUID: ${GREEN}${old_uuid}${PLAIN}"
+            echo -e "\n${YELLOW}提示: 保留配置可使手机/电脑客户端无需重新导入任何参数，实现无缝平滑升级！${PLAIN}\n"
+
+            read -r -p "是否保留原有配置（域名、UUID、端口、密钥等）平滑升级？[Y/n]: " keep_choice
+            if [[ "${keep_choice}" != "n" && "${keep_choice}" != "N" ]]; then
+                is_reuse="true"
+                info "已选择保留原有配置，执行平滑升级..."
+            else
+                info "已选择重新生成全新随机配置与密钥。"
+                user_domain=""
+            fi
+        fi
+    fi
+
+    if [[ "${is_reuse}" == "true" && -n "${user_domain}" ]]; then
+        echo ""
+        read -r -p "确认或修改解析域名 [回车保持为 ${user_domain}]: " input_domain
+        user_domain="${input_domain:-${user_domain}}"
+    else
+        title "配置 Cloudflare 域名"
+        echo -e "提示: 请确保你已经在 Cloudflare 将该域名解析到 VPS IP (${GREEN}${public_ip}${PLAIN})。"
+        echo -e "注意: 请保持 Cloudflare 上的代理状态为 ${YELLOW}仅限 DNS (灰色云朵)${PLAIN}。\n"
+
+        while true; do
+            read -r -p "请输入你的域名 (如 node.yourdomain.com): " user_domain
+            user_domain=$(echo "${user_domain}" | tr -d "[:space:]")
+            if [[ -n "${user_domain}" ]]; then
+                break
+            fi
+            warn "域名不能为空，请重新输入！"
+        done
+    fi
 
     title "配置 TCP Brutal 与带宽限速参数"
     echo -e "提示: 服务端上行对应客户端下行，服务端下行对应客户端上行。"
-    read -r -p "请输入 VPS 上行带宽限制 up_mbps [回车默认 50]: " input_up
-    local server_up_mbps="${input_up:-50}"
-    read -r -p "请输入 VPS 下行带宽限制 down_mbps [回车默认 500]: " input_down
-    local server_down_mbps="${input_down:-500}"
+    read -r -p "请输入 VPS 上行带宽限制 up_mbps [回车默认 ${old_up}]: " input_up
+    local server_up_mbps="${input_up:-${old_up}}"
+    read -r -p "请输入 VPS 下行带宽限制 down_mbps [回车默认 ${old_down}]: " input_down
+    local server_down_mbps="${input_down:-${old_down}}"
     info "设定带宽限制: VPS 上行 ${server_up_mbps} Mbps / 下行 ${server_down_mbps} Mbps"
 
     install_singbox_core
-    generate_configs "${user_domain}" "${public_ip}" "${server_up_mbps}" "${server_down_mbps}"
+    generate_configs "${user_domain}" "${public_ip}" "${server_up_mbps}" "${server_down_mbps}" "${is_reuse}"
     start_service
     setup_shortcut
 
