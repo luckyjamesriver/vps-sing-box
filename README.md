@@ -76,8 +76,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box
 4. 重启 Sing-box 服务
 5. 停止 Sing-box 服务
 6. 查看 实时运行日志 (退出按 Ctrl+C)
-7. 单独更新 Sing-box 核心版本
-8. 完全卸载 Sing-box
+7. 更新 管理脚本自身 (Update Script)
+8. 单独更新 Sing-box 核心版本
+9. 完全卸载 Sing-box
 0. 退出菜单
 ----------------------------------------------------
 ```

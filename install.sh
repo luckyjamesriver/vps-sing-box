@@ -809,16 +809,22 @@ show_client_config() {
 
 # --- Create Shortcut CLI Script ---
 setup_shortcut() {
-    # 若通过 bash <(curl ...) 管道执行，$0 为已读尽的虚拟管道，需拉取完整脚本持久化
+    mkdir -p "${CONFIG_DIR}"
     if [[ -f "$0" && "$0" != /dev/fd/* && "$0" != /proc/* ]]; then
         cp -f "$0" "${SCRIPT_PATH}"
     else
-        curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/install.sh" -o "${SCRIPT_PATH}" 2>/dev/null || true
+        info "正在安装管理脚本至 ${SCRIPT_PATH}..."
+        curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/install.sh?v=$(date +%s)" -o "${SCRIPT_PATH}"
     fi
     chmod +x "${SCRIPT_PATH}"
-    ln -sf "${SCRIPT_PATH}" "${CLI_LINK}"
-    # 兼容清理旧的 sb 快捷方式
-    rm -f "/usr/local/bin/sb"
+
+    # 创建快捷命令软链接，覆盖 /usr/bin 与 /usr/local/bin，确保 100% 识别
+    ln -sf "${SCRIPT_PATH}" "/usr/bin/vps"
+    ln -sf "${SCRIPT_PATH}" "/usr/local/bin/vps"
+    ln -sf "${SCRIPT_PATH}" "/usr/bin/sb"
+    ln -sf "${SCRIPT_PATH}" "/usr/local/bin/sb"
+
+    info "快捷命令 [vps] 已就绪。"
 }
 
 # --- Interactive Install Entrypoint ---
@@ -921,6 +927,32 @@ service_logs() {
     journalctl -u sing-box -f -o cat
 }
 
+# --- Update Management Script ---
+update_script() {
+    info "正在从 GitHub 获取最新版本管理脚本..."
+    local temp_file
+    temp_file=$(mktemp)
+    if curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/install.sh?v=$(date +%s)" -o "${temp_file}"; then
+        if [[ -s "${temp_file}" ]]; then
+            mv -f "${temp_file}" "${SCRIPT_PATH}"
+            chmod +x "${SCRIPT_PATH}"
+            ln -sf "${SCRIPT_PATH}" "/usr/bin/vps"
+            ln -sf "${SCRIPT_PATH}" "/usr/local/bin/vps"
+            ln -sf "${SCRIPT_PATH}" "/usr/bin/sb"
+            ln -sf "${SCRIPT_PATH}" "/usr/local/bin/sb"
+            info "管理脚本已成功更新至最新版本！"
+            sleep 1
+            exec "${SCRIPT_PATH}"
+        else
+            error "下载的脚本为空，取消更新！"
+            rm -f "${temp_file}"
+        fi
+    else
+        error "获取最新脚本失败，请检查网络连接！"
+        rm -f "${temp_file}"
+    fi
+}
+
 # --- Update Core Only ---
 update_core() {
     check_root
@@ -946,8 +978,8 @@ uninstall_flow() {
 
     rm -f "${BIN_PATH}"
     rm -rf "${CONFIG_DIR}"
-    rm -f "${CLI_LINK}"
-    rm -f "/usr/local/bin/sb"
+    rm -f "/usr/bin/vps" "/usr/local/bin/vps"
+    rm -f "/usr/bin/sb" "/usr/local/bin/sb"
 
     info "Sing-box 已完全从系统中卸载干净。"
 }
@@ -973,12 +1005,13 @@ menu() {
     echo -e "${GREEN}4.${PLAIN} 重启 Sing-box 服务"
     echo -e "${GREEN}5.${PLAIN} 停止 Sing-box 服务"
     echo -e "${GREEN}6.${PLAIN} 查看 实时运行日志 (退出按 Ctrl+C)"
-    echo -e "${GREEN}7.${PLAIN} 单独更新 Sing-box 核心版本"
-    echo -e "${GREEN}8.${PLAIN} 完全卸载 Sing-box"
+    echo -e "${GREEN}7.${PLAIN} 更新 管理脚本自身 (Update Script)"
+    echo -e "${GREEN}8.${PLAIN} 单独更新 Sing-box 核心版本"
+    echo -e "${GREEN}9.${PLAIN} 完全卸载 Sing-box"
     echo -e "${GREEN}0.${PLAIN} 退出菜单"
     echo -e "----------------------------------------------------"
 
-    read -r -p "请输入选项 [0-8]: " choice
+    read -r -p "请输入选项 [0-9]: " choice
     case "${choice}" in
         1) install_flow ;;
         2) show_nodes ;;
@@ -986,8 +1019,9 @@ menu() {
         4) service_restart ;;
         5) service_stop ;;
         6) service_logs ;;
-        7) update_core ;;
-        8) uninstall_flow ;;
+        7) update_script ;;
+        8) update_core ;;
+        9) uninstall_flow ;;
         0) exit 0 ;;
         *) warn "无效选项，请重新输入！"; sleep 1; menu ;;
     esac
@@ -1017,6 +1051,9 @@ if [[ $# -gt 0 ]]; then
         log|logs)
             service_logs
             ;;
+        upgrade|update-script)
+            update_script
+            ;;
         update)
             update_core
             ;;
@@ -1024,7 +1061,7 @@ if [[ $# -gt 0 ]]; then
             uninstall_flow
             ;;
         *)
-            echo "用法: $0 {install|show|client|restart|stop|status|logs|update|uninstall}"
+            echo "用法: $0 {install|show|client|restart|stop|status|logs|upgrade|update|uninstall}"
             exit 1
             ;;
     esac
