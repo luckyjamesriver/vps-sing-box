@@ -289,9 +289,13 @@ generate_configs() {
   "dns": {
     "servers": [
       {
+        "tag": "dns-local",
+        "type": "local"
+      },
+      {
         "tag": "dns-remote",
-        "address": "https://1.1.1.1/dns-query",
-        "detour": "direct"
+        "type": "udp",
+        "server": "1.1.1.1"
       }
     ]
   },
@@ -400,6 +404,7 @@ generate_configs() {
     }
   ],
   "route": {
+    "default_domain_resolver": "dns-remote",
     "rules": [
       {
         "protocol": "bittorrent",
@@ -420,6 +425,19 @@ EOF
   "log": {
     "level": "info",
     "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "tag": "dns-remote",
+        "type": "udp",
+        "server": "1.1.1.1"
+      },
+      {
+        "tag": "dns-local",
+        "type": "local"
+      }
+    ]
   },
   "inbounds": [
     {
@@ -538,6 +556,7 @@ EOF
     }
   ],
   "route": {
+    "default_domain_resolver": "dns-remote",
     "rules": [
       {
         "ip_is_private": true,
