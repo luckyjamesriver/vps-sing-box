@@ -61,7 +61,7 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/install.sh)
 ```
 
-安装完成后，随时在终端输入快捷命令 **`sb`** 即可唤出交互式管理菜单：
+安装完成后，随时在终端输入快捷命令 **`vps`** 即可唤出交互式管理菜单：
 
 ```text
 ====================================================
@@ -87,7 +87,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box
 ## 📱 客户端配置与使用指南
 
 ### 方式 1：通过分享链接导入（最简单快捷）
-在终端运行 `sb` -> 选择 `2. 查看 节点连接链接 与 二维码`：
+在终端运行 `vps` -> 选择 `2. 查看 节点连接链接 与 二维码`：
 * **手机端（Shadowrocket / Sing-box / v2rayN 等）**：直接扫描屏幕上的 ASCII 二维码即可导入。
 * **电脑端（v2rayN / Clash Verge / Flclash 等）**：复制链接后直接通过剪贴板添加节点。
 * **直连保障**：所有分享链接与客户端配置中的连接地址（`server`）均已**自动配置为 VPS 公网 IP 直连**，彻底解决本地 DNS 污染、解析慢或解析错误导致连不上的烦恼。
@@ -95,7 +95,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box
 ### 方式 2：使用专用客户端配置文件（功能最全面）
 脚本在服务端独立创建了 `client` 目录，专门存放生成好的客户端配置文件：
 * **文件绝对路径**：`/etc/sing-box/client/config.json`
-* **查看复制**：终端运行 `sb` -> 选择 `3. 查看并复制 客户端完整配置文件`，复制内容保存到电脑/手机即可开箱即用。
+* **查看复制**：终端运行 `vps` -> 选择 `3. 查看并复制 客户端完整配置文件`，复制内容保存到电脑/手机即可开箱即用。
 * **SFTP 拖取**：使用 FinalShell / Termius 等 SSH 客户端，直接拖取 `/etc/sing-box/client/config.json` 到本地。
 * 该客户端配置已预置：
   - 本地混合代理入站（`127.0.0.1:2080`，同时支持 HTTP 与 SOCKS5）。

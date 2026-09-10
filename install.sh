@@ -33,7 +33,7 @@ CERT_PEM="${CONFIG_DIR}/cert.pem"
 SERVICE_FILE="/etc/systemd/system/sing-box.service"
 BIN_PATH="/usr/local/bin/sing-box"
 SCRIPT_PATH="/etc/sing-box/manage.sh"
-CLI_LINK="/usr/local/bin/sb"
+CLI_LINK="/usr/local/bin/vps"
 
 # --- Helper Output Functions ---
 info()    { echo -e "${GREEN}[INFO]${PLAIN} $*"; }
@@ -792,7 +792,7 @@ show_nodes() {
     title "VLESS-Reality (TCP Brutal) 二维码 (手机扫码即可导入)"
     qrencode -t ANSIUTF8 "${uri_reality_tcp}" || true
 
-    echo -e "\n${YELLOW}提示:${PLAIN} 随时输入快捷管理命令 ${GREEN}sb${PLAIN} 即可唤出管理菜单！"
+    echo -e "\n${YELLOW}提示:${PLAIN} 随时输入快捷管理命令 ${GREEN}vps${PLAIN} 即可唤出管理菜单！"
 }
 
 # --- Show Client Config JSON ---
@@ -809,9 +809,16 @@ show_client_config() {
 
 # --- Create Shortcut CLI Script ---
 setup_shortcut() {
-    cp -f "$0" "${SCRIPT_PATH}"
+    # 若通过 bash <(curl ...) 管道执行，$0 为已读尽的虚拟管道，需拉取完整脚本持久化
+    if [[ -f "$0" && "$0" != /dev/fd/* && "$0" != /proc/* ]]; then
+        cp -f "$0" "${SCRIPT_PATH}"
+    else
+        curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/install.sh" -o "${SCRIPT_PATH}" 2>/dev/null || true
+    fi
     chmod +x "${SCRIPT_PATH}"
     ln -sf "${SCRIPT_PATH}" "${CLI_LINK}"
+    # 兼容清理旧的 sb 快捷方式
+    rm -f "/usr/local/bin/sb"
 }
 
 # --- Interactive Install Entrypoint ---
@@ -940,6 +947,7 @@ uninstall_flow() {
     rm -f "${BIN_PATH}"
     rm -rf "${CONFIG_DIR}"
     rm -f "${CLI_LINK}"
+    rm -f "/usr/local/bin/sb"
 
     info "Sing-box 已完全从系统中卸载干净。"
 }
