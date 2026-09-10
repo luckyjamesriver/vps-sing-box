@@ -25,7 +25,8 @@ PLAIN="\033[0m"
 # --- Global Paths ---
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
-CLIENT_FILE="${CONFIG_DIR}/client_config.json"
+CLIENT_DIR="${CONFIG_DIR}/client"
+CLIENT_FILE="${CLIENT_DIR}/config.json"
 INFO_FILE="${CONFIG_DIR}/node_info.json"
 CERT_KEY="${CONFIG_DIR}/cert.key"
 CERT_PEM="${CONFIG_DIR}/cert.pem"
@@ -293,8 +294,12 @@ generate_configs() {
             [[ -z "${salamander_pwd}" ]] && salamander_pwd=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .obfs.password // empty' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
         fi
 
-        if [[ -f "${CLIENT_FILE}" && -z "${public_key}" ]]; then
-            public_key=$(jq -r '.outbounds[] | select(.type=="vless") | .tls.reality.public_key' "${CLIENT_FILE}" 2>/dev/null | head -n 1)
+        if [[ -z "${public_key}" ]]; then
+            if [[ -f "${CLIENT_FILE}" ]]; then
+                public_key=$(jq -r '.outbounds[] | select(.type=="vless") | .tls.reality.public_key' "${CLIENT_FILE}" 2>/dev/null | head -n 1)
+            elif [[ -f "${CONFIG_DIR}/client_config.json" ]]; then
+                public_key=$(jq -r '.outbounds[] | select(.type=="vless") | .tls.reality.public_key' "${CONFIG_DIR}/client_config.json" 2>/dev/null | head -n 1)
+            fi
         fi
     fi
 
@@ -506,6 +511,7 @@ generate_configs() {
 EOF
 
     # 2. Client Complete Configuration (Matched Bandwidth Values, Brutal, Salamander OBFS)
+    mkdir -p "${CLIENT_DIR}"
     cat > "${CLIENT_FILE}" <<EOF
 {
   "log": {
@@ -562,7 +568,7 @@ EOF
     {
       "type": "vless",
       "tag": "VLESS-Reality-Brutal",
-      "server": "${domain}",
+      "server": "${public_ip}",
       "server_port": ${port_reality_tcp},
       "uuid": "${uuid}",
       "tls": {
@@ -595,7 +601,7 @@ EOF
     {
       "type": "vless",
       "tag": "VLESS-Reality-gRPC",
-      "server": "${domain}",
+      "server": "${public_ip}",
       "server_port": ${port_reality_grpc},
       "uuid": "${uuid}",
       "network": "tcp",
@@ -620,7 +626,7 @@ EOF
     {
       "type": "hysteria2",
       "tag": "Hysteria2",
-      "server": "${domain}",
+      "server": "${public_ip}",
       "server_port": ${port_hy2},
       "up_mbps": ${client_up_mbps},
       "down_mbps": ${client_down_mbps},
@@ -641,7 +647,7 @@ EOF
     {
       "type": "tuic",
       "tag": "TUIC-v5",
-      "server": "${domain}",
+      "server": "${public_ip}",
       "server_port": ${port_tuic},
       "uuid": "${uuid}",
       "password": "${tuic_password}",
@@ -684,6 +690,8 @@ EOF
   }
 }
 EOF
+
+    ln -sf "${CLIENT_FILE}" "${CONFIG_DIR}/client_config.json"
 
     # 3. Save Node Metadata File for Easy Retrieval
     cat > "${INFO_FILE}" <<EOF
@@ -758,14 +766,14 @@ show_nodes() {
     client_up_mbps=$(jq -r ".client_up_mbps" "${INFO_FILE}")
     client_down_mbps=$(jq -r ".client_down_mbps" "${INFO_FILE}")
 
-    # Standard Share Links
-    local uri_reality_tcp="vless://${uuid}@${domain}:${port_reality_tcp}?encryption=none&security=reality&sni=${reality_sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp#VLESS-Reality-Brutal"
-    local uri_reality_grpc="vless://${uuid}@${domain}:${port_reality_grpc}?encryption=none&security=reality&sni=${reality_sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=grpc&serviceName=grpc-service#VLESS-Reality-gRPC"
-    local uri_hy2="hysteria2://${hy2_password}@${domain}:${port_hy2}/?insecure=1&sni=${domain}&obfs=salamander&obfs-password=${salamander_pwd}#Hysteria2"
-    local uri_tuic="tuic://${uuid}:${tuic_password}@${domain}:${port_tuic}?congestion_control=bbr&alpn=h3&sni=${domain}&allow_insecure=1#TUIC-v5"
+    # Standard Share Links (Using Public IP for direct connection)
+    local uri_reality_tcp="vless://${uuid}@${public_ip}:${port_reality_tcp}?encryption=none&security=reality&sni=${reality_sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp#VLESS-Reality-Brutal"
+    local uri_reality_grpc="vless://${uuid}@${public_ip}:${port_reality_grpc}?encryption=none&security=reality&sni=${reality_sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=grpc&serviceName=grpc-service#VLESS-Reality-gRPC"
+    local uri_hy2="hysteria2://${hy2_password}@${public_ip}:${port_hy2}/?insecure=1&sni=${domain}&obfs=salamander&obfs-password=${salamander_pwd}#Hysteria2"
+    local uri_tuic="tuic://${uuid}:${tuic_password}@${public_ip}:${port_tuic}?congestion_control=bbr&alpn=h3&sni=${domain}&allow_insecure=1#TUIC-v5"
 
     title "Sing-box 专属节点与连接链接"
-    echo -e "${YELLOW}绑定域名:${PLAIN} ${domain}  |  ${YELLOW}VPS 公网 IP:${PLAIN} ${public_ip}"
+    echo -e "${YELLOW}绑定域名:${PLAIN} ${domain}  |  ${YELLOW}VPS 连接 IP:${PLAIN} ${public_ip}"
     echo -e "${YELLOW}带宽限量设置:${PLAIN} 服务端上行 ${server_up_mbps} Mbps, 下行 ${server_down_mbps} Mbps | 客户端对应上行 ${client_up_mbps} Mbps, 下行 ${client_down_mbps} Mbps"
     echo -e "${YELLOW}客户端配置文件:${PLAIN} ${CLIENT_FILE}\n"
 
@@ -785,66 +793,6 @@ show_nodes() {
     qrencode -t ANSIUTF8 "${uri_reality_tcp}" || true
 
     echo -e "\n${YELLOW}提示:${PLAIN} 随时输入快捷管理命令 ${GREEN}sb${PLAIN} 即可唤出管理菜单！"
-}
-
-# --- Temporary Web Download Server ---
-start_web_download() {
-    if [[ ! -f "${CLIENT_FILE}" ]]; then
-        error "未找到客户端配置文件，请先执行安装！"
-        return 1
-    fi
-
-    if ! command -v python3 >/dev/null 2>&1; then
-        warn "未检测到 Python3，正在自动安装..."
-        apt-get update -y && apt-get install -y python3
-    fi
-
-    local domain public_ip
-    domain=$(jq -r ".domain" "${INFO_FILE}" 2>/dev/null || echo "")
-    public_ip=$(jq -r ".public_ip" "${INFO_FILE}" 2>/dev/null || get_public_ip)
-
-    local web_port
-    web_port=$(get_random_port)
-
-    local temp_web_dir
-    temp_web_dir=$(mktemp -d)
-    cp -f "${CLIENT_FILE}" "${temp_web_dir}/config.json"
-    cp -f "${CLIENT_FILE}" "${temp_web_dir}/client_config.json"
-
-    allow_ports "${web_port}"
-
-    # Start background python http server
-    python3 -m http.server "${web_port}" --directory "${temp_web_dir}" >/dev/null 2>&1 &
-    local web_pid=$!
-
-    title "临时浏览器一键下载服务已就绪"
-    echo -e "👉 请在你的电脑或手机浏览器中打开以下任一链接，即可直接下载客户端配置:\n"
-    if [[ -n "${public_ip}" ]]; then
-        echo -e "   ${GREEN}http://${public_ip}:${web_port}/config.json${PLAIN}"
-    fi
-    if [[ -n "${domain}" ]]; then
-        echo -e "   ${GREEN}http://${domain}:${web_port}/config.json${PLAIN}"
-    fi
-
-    echo -e "\n${YELLOW}安全提示:${PLAIN}"
-    echo -e "  1. 浏览器打开后会自动下载或展示 ${GREEN}config.json${PLAIN}。"
-    echo -e "  2. 下载完成后，请回到此处按 ${GREEN}[回车键 Enter]${PLAIN}，脚本将立即关闭此临时 Web 服务并释放端口。"
-    echo -e "  3. 为保障绝对安全，若 180 秒内无操作，服务将自动超时销毁。"
-
-    read -r -t 180 -p $\x27\n按 [回车键 Enter] 即可立即关闭临时下载服务: \x27 _ || true
-
-    kill "${web_pid}" >/dev/null 2>&1 || true
-    wait "${web_pid}" 2>/dev/null || true
-    rm -rf "${temp_web_dir}"
-
-    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-        ufw delete allow "${web_port}" >/dev/null 2>&1 || true
-    fi
-    if command -v iptables >/dev/null 2>&1; then
-        iptables -D INPUT -p tcp --dport "${web_port}" -j ACCEPT >/dev/null 2>&1 || true
-    fi
-
-    info "临时下载服务已安全销毁，端口已关闭！"
 }
 
 # --- Show Client Config JSON ---
@@ -945,12 +893,6 @@ install_flow() {
     setup_shortcut
 
     show_nodes
-
-    echo ""
-    read -r -p "是否立即启动临时浏览器下载服务，直接在电脑/手机上下载客户端配置？[Y/n]: " web_dl_choice
-    if [[ "${web_dl_choice}" != "n" && "${web_dl_choice}" != "N" ]]; then
-        start_web_download
-    fi
 }
 
 # --- Service Management Handlers ---
@@ -1019,27 +961,25 @@ menu() {
     echo -e "----------------------------------------------------"
     echo -e "${GREEN}1.${PLAIN} 安装 / 重新配置 Sing-box (4合1强力协议)"
     echo -e "${GREEN}2.${PLAIN} 查看 节点连接链接 与 二维码"
-    echo -e "${GREEN}3.${PLAIN} 开启 浏览器临时一键下载 客户端配置 (🌟 推荐)"
-    echo -e "${GREEN}4.${PLAIN} 查看并复制 客户端完整配置文件 (client_config.json)"
-    echo -e "${GREEN}5.${PLAIN} 重启 Sing-box 服务"
-    echo -e "${GREEN}6.${PLAIN} 停止 Sing-box 服务"
-    echo -e "${GREEN}7.${PLAIN} 查看 实时运行日志 (退出按 Ctrl+C)"
-    echo -e "${GREEN}8.${PLAIN} 单独更新 Sing-box 核心版本"
-    echo -e "${GREEN}9.${PLAIN} 完全卸载 Sing-box"
+    echo -e "${GREEN}3.${PLAIN} 查看并复制 客户端完整配置文件 (/etc/sing-box/client/config.json)"
+    echo -e "${GREEN}4.${PLAIN} 重启 Sing-box 服务"
+    echo -e "${GREEN}5.${PLAIN} 停止 Sing-box 服务"
+    echo -e "${GREEN}6.${PLAIN} 查看 实时运行日志 (退出按 Ctrl+C)"
+    echo -e "${GREEN}7.${PLAIN} 单独更新 Sing-box 核心版本"
+    echo -e "${GREEN}8.${PLAIN} 完全卸载 Sing-box"
     echo -e "${GREEN}0.${PLAIN} 退出菜单"
     echo -e "----------------------------------------------------"
 
-    read -r -p "请输入选项 [0-9]: " choice
+    read -r -p "请输入选项 [0-8]: " choice
     case "${choice}" in
         1) install_flow ;;
         2) show_nodes ;;
-        3) start_web_download ;;
-        4) show_client_config ;;
-        5) service_restart ;;
-        6) service_stop ;;
-        7) service_logs ;;
-        8) update_core ;;
-        9) uninstall_flow ;;
+        3) show_client_config ;;
+        4) service_restart ;;
+        5) service_stop ;;
+        6) service_logs ;;
+        7) update_core ;;
+        8) uninstall_flow ;;
         0) exit 0 ;;
         *) warn "无效选项，请重新输入！"; sleep 1; menu ;;
     esac
@@ -1053,9 +993,6 @@ if [[ $# -gt 0 ]]; then
             ;;
         show)
             show_nodes
-            ;;
-        download|web)
-            start_web_download
             ;;
         client)
             show_client_config

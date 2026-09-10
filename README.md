@@ -72,13 +72,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box
 ----------------------------------------------------
 1. 安装 / 重新配置 Sing-box (4合1强力协议)
 2. 查看 节点连接链接 与 二维码
-3. 开启 浏览器临时一键下载 客户端配置 (🌟 推荐)
-4. 查看并复制 客户端完整配置文件 (client_config.json)
-5. 重启 Sing-box 服务
-6. 停止 Sing-box 服务
-7. 查看 实时运行日志 (退出按 Ctrl+C)
-8. 单独更新 Sing-box 核心版本
-9. 完全卸载 Sing-box
+3. 查看并复制 客户端完整配置文件 (/etc/sing-box/client/config.json)
+4. 重启 Sing-box 服务
+5. 停止 Sing-box 服务
+6. 查看 实时运行日志 (退出按 Ctrl+C)
+7. 单独更新 Sing-box 核心版本
+8. 完全卸载 Sing-box
 0. 退出菜单
 ----------------------------------------------------
 ```
@@ -87,26 +86,22 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box
 
 ## 📱 客户端配置与使用指南
 
-### 方式 1：通过分享链接导入（最简单）
+### 方式 1：通过分享链接导入（最简单快捷）
 在终端运行 `sb` -> 选择 `2. 查看 节点连接链接 与 二维码`：
 * **手机端（Shadowrocket / Sing-box / v2rayN 等）**：直接扫描屏幕上的 ASCII 二维码即可导入。
 * **电脑端（v2rayN / Clash Verge / Flclash 等）**：复制链接后直接通过剪贴板添加节点。
+* **直连保障**：所有分享链接与客户端配置中的连接地址（`server`）均已**自动配置为 VPS 公网 IP 直连**，彻底解决本地 DNS 污染、解析慢或解析错误导致连不上的烦恼。
 
-### 方式 2：浏览器临时一键下载 `config.json`（🌟 强烈推荐，体验最佳）
-脚本内置了极简零依赖的临时 Web 下载服务：
-1. 在终端运行 `sb` -> 选择 `3. 开启 浏览器临时一键下载 客户端配置`（或直接执行 `sb download`）。
-2. 脚本会给出一个临时链接，例如：`http://你的VPS公网IP:52189/config.json`。
-3. 在电脑或手机浏览器打开该链接，即可**一键将完整的配置文件保存到本地下载文件夹**，无需繁琐的复制粘贴！
-4. 下载完成后回车，临时下载服务立即关闭并自动销毁端口，安全无痕。
-
-### 方式 3：终端查看或通过 SFTP 拖取
-* **终端复制**：运行 `sb` -> 选择 `4. 查看并复制 客户端完整配置文件`，全选终端文本保存为本地文件。
-* **SFTP 拖取**：使用 FinalShell / Termius 等工具，直接下载 `/etc/sing-box/client_config.json`。
-3. 该配置已内置：
-   * 本地混合代理入站（`127.0.0.1:2080`，同时支持 HTTP 与 SOCKS5）。
-   * 自动测速节点组（`auto`，智能选择延迟最低的节点）。
-   * 节点选择组（`select`，可自由切换 Reality-Vision、Reality-gRPC、Hysteria2、TUIC）。
-   * 私有内网地址直连，保障安全与体验。
+### 方式 2：使用专用客户端配置文件（功能最全面）
+脚本在服务端独立创建了 `client` 目录，专门存放生成好的客户端配置文件：
+* **文件绝对路径**：`/etc/sing-box/client/config.json`
+* **查看复制**：终端运行 `sb` -> 选择 `3. 查看并复制 客户端完整配置文件`，复制内容保存到电脑/手机即可开箱即用。
+* **SFTP 拖取**：使用 FinalShell / Termius 等 SSH 客户端，直接拖取 `/etc/sing-box/client/config.json` 到本地。
+* 该客户端配置已预置：
+  - 本地混合代理入站（`127.0.0.1:2080`，同时支持 HTTP 与 SOCKS5）。
+  - 自动测速节点组（`auto`，智能选择延迟最低的节点）。
+  - 节点选择组（`select`，可自由切换各协议）。
+  - 局域网及私有 IP 直连规则。
 
 ---
 
@@ -115,7 +110,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box
 | 功能 | 路径 |
 | :--- | :--- |
 | 服务端配置文件 | `/etc/sing-box/config.json` |
-| 客户端配置文件 | `/etc/sing-box/client_config.json` |
+| 客户端专用配置文件 | `/etc/sing-box/client/config.json` |
 | 节点凭据与端口存档 | `/etc/sing-box/node_info.json` |
 | 10年自签证书/私钥 | `/etc/sing-box/cert.pem` / `cert.key` |
 | Sing-box 核心二进制 | `/usr/local/bin/sing-box` |
