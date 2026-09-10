@@ -63,12 +63,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box
 ----------------------------------------------------
 1. 安装 / 重新配置 Sing-box (4合1强力协议)
 2. 查看 节点连接链接 与 二维码
-3. 查看并复制 客户端完整配置文件 (client_config.json)
-4. 重启 Sing-box 服务
-5. 停止 Sing-box 服务
-6. 查看 实时运行日志 (退出按 Ctrl+C)
-7. 单独更新 Sing-box 核心版本
-8. 完全卸载 Sing-box
+3. 开启 浏览器临时一键下载 客户端配置 (🌟 推荐)
+4. 查看并复制 客户端完整配置文件 (client_config.json)
+5. 重启 Sing-box 服务
+6. 停止 Sing-box 服务
+7. 查看 实时运行日志 (退出按 Ctrl+C)
+8. 单独更新 Sing-box 核心版本
+9. 完全卸载 Sing-box
 0. 退出菜单
 ----------------------------------------------------
 ```
@@ -82,10 +83,16 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box
 * **手机端（Shadowrocket / Sing-box / v2rayN 等）**：直接扫描屏幕上的 ASCII 二维码即可导入。
 * **电脑端（v2rayN / Clash Verge / Flclash 等）**：复制链接后直接通过剪贴板添加节点。
 
-### 方式 2：使用官方客户端配置 `client_config.json`
-脚本已在 VPS 本地的 `/etc/sing-box/client_config.json` 为你生成好了一份可以直接使用的客户端配置文件：
-1. 在终端运行 `sb` -> 选择 `3. 查看并复制 客户端完整配置文件`。
-2. 将内容复制保存为本地文件，导入到 **Sing-box GUI / 手机端** 即可。
+### 方式 2：浏览器临时一键下载 `config.json`（🌟 强烈推荐，体验最佳）
+脚本内置了极简零依赖的临时 Web 下载服务：
+1. 在终端运行 `sb` -> 选择 `3. 开启 浏览器临时一键下载 客户端配置`（或直接执行 `sb download`）。
+2. 脚本会给出一个临时链接，例如：`http://你的VPS公网IP:52189/config.json`。
+3. 在电脑或手机浏览器打开该链接，即可**一键将完整的配置文件保存到本地下载文件夹**，无需繁琐的复制粘贴！
+4. 下载完成后回车，临时下载服务立即关闭并自动销毁端口，安全无痕。
+
+### 方式 3：终端查看或通过 SFTP 拖取
+* **终端复制**：运行 `sb` -> 选择 `4. 查看并复制 客户端完整配置文件`，全选终端文本保存为本地文件。
+* **SFTP 拖取**：使用 FinalShell / Termius 等工具，直接下载 `/etc/sing-box/client_config.json`。
 3. 该配置已内置：
    * 本地混合代理入站（`127.0.0.1:2080`，同时支持 HTTP 与 SOCKS5）。
    * 自动测速节点组（`auto`，智能选择延迟最低的节点）。

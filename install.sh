@@ -87,7 +87,7 @@ install_dependencies() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
     apt-get install -y --no-install-recommends \
-        curl wget jq tar openssl qrencode vim sudo lsof ufw ca-certificates
+        curl wget jq tar openssl qrencode vim sudo lsof ufw ca-certificates python3
     info "基础依赖安装完成。"
 }
 
@@ -646,6 +646,66 @@ show_nodes() {
     echo -e "\n${YELLOW}提示:${PLAIN} 随时输入快捷管理命令 ${GREEN}sb${PLAIN} 即可唤出管理菜单！"
 }
 
+# --- Temporary Web Download Server ---
+start_web_download() {
+    if [[ ! -f "${CLIENT_FILE}" ]]; then
+        error "未找到客户端配置文件，请先执行安装！"
+        return 1
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        warn "未检测到 Python3，正在自动安装..."
+        apt-get update -y && apt-get install -y python3
+    fi
+
+    local domain public_ip
+    domain=$(jq -r ".domain" "${INFO_FILE}" 2>/dev/null || echo "")
+    public_ip=$(jq -r ".public_ip" "${INFO_FILE}" 2>/dev/null || get_public_ip)
+
+    local web_port
+    web_port=$(get_random_port)
+
+    local temp_web_dir
+    temp_web_dir=$(mktemp -d)
+    cp -f "${CLIENT_FILE}" "${temp_web_dir}/config.json"
+    cp -f "${CLIENT_FILE}" "${temp_web_dir}/client_config.json"
+
+    allow_ports "${web_port}"
+
+    # Start background python http server
+    python3 -m http.server "${web_port}" --directory "${temp_web_dir}" >/dev/null 2>&1 &
+    local web_pid=$!
+
+    title "临时浏览器一键下载服务已就绪"
+    echo -e "👉 请在你的电脑或手机浏览器中打开以下任一链接，即可直接下载客户端配置:\n"
+    if [[ -n "${public_ip}" ]]; then
+        echo -e "   ${GREEN}http://${public_ip}:${web_port}/config.json${PLAIN}"
+    fi
+    if [[ -n "${domain}" ]]; then
+        echo -e "   ${GREEN}http://${domain}:${web_port}/config.json${PLAIN}"
+    fi
+
+    echo -e "\n${YELLOW}安全提示:${PLAIN}"
+    echo -e "  1. 浏览器打开后会自动下载或展示 ${GREEN}config.json${PLAIN}。"
+    echo -e "  2. 下载完成后，请回到此处按 ${GREEN}[回车键 Enter]${PLAIN}，脚本将立即关闭此临时 Web 服务并释放端口。"
+    echo -e "  3. 为保障绝对安全，若 180 秒内无操作，服务将自动超时销毁。"
+
+    read -r -t 180 -p $\x27\n按 [回车键 Enter] 即可立即关闭临时下载服务: \x27 _ || true
+
+    kill "${web_pid}" >/dev/null 2>&1 || true
+    wait "${web_pid}" 2>/dev/null || true
+    rm -rf "${temp_web_dir}"
+
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+        ufw delete allow "${web_port}" >/dev/null 2>&1 || true
+    fi
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -D INPUT -p tcp --dport "${web_port}" -j ACCEPT >/dev/null 2>&1 || true
+    fi
+
+    info "临时下载服务已安全销毁，端口已关闭！"
+}
+
 # --- Show Client Config JSON ---
 show_client_config() {
     if [[ -f "${CLIENT_FILE}" ]]; then
@@ -695,6 +755,12 @@ install_flow() {
     setup_shortcut
 
     show_nodes
+
+    echo ""
+    read -r -p "是否立即启动临时浏览器下载服务，直接在电脑/手机上下载客户端配置？[Y/n]: " web_dl_choice
+    if [[ "${web_dl_choice}" != "n" && "${web_dl_choice}" != "N" ]]; then
+        start_web_download
+    fi
 }
 
 # --- Service Management Handlers ---
@@ -763,25 +829,27 @@ menu() {
     echo -e "----------------------------------------------------"
     echo -e "${GREEN}1.${PLAIN} 安装 / 重新配置 Sing-box (4合1强力协议)"
     echo -e "${GREEN}2.${PLAIN} 查看 节点连接链接 与 二维码"
-    echo -e "${GREEN}3.${PLAIN} 查看并复制 客户端完整配置文件 (client_config.json)"
-    echo -e "${GREEN}4.${PLAIN} 重启 Sing-box 服务"
-    echo -e "${GREEN}5.${PLAIN} 停止 Sing-box 服务"
-    echo -e "${GREEN}6.${PLAIN} 查看 实时运行日志 (退出按 Ctrl+C)"
-    echo -e "${GREEN}7.${PLAIN} 单独更新 Sing-box 核心版本"
-    echo -e "${GREEN}8.${PLAIN} 完全卸载 Sing-box"
+    echo -e "${GREEN}3.${PLAIN} 开启 浏览器临时一键下载 客户端配置 (🌟 推荐)"
+    echo -e "${GREEN}4.${PLAIN} 查看并复制 客户端完整配置文件 (client_config.json)"
+    echo -e "${GREEN}5.${PLAIN} 重启 Sing-box 服务"
+    echo -e "${GREEN}6.${PLAIN} 停止 Sing-box 服务"
+    echo -e "${GREEN}7.${PLAIN} 查看 实时运行日志 (退出按 Ctrl+C)"
+    echo -e "${GREEN}8.${PLAIN} 单独更新 Sing-box 核心版本"
+    echo -e "${GREEN}9.${PLAIN} 完全卸载 Sing-box"
     echo -e "${GREEN}0.${PLAIN} 退出菜单"
     echo -e "----------------------------------------------------"
 
-    read -r -p "请输入选项 [0-8]: " choice
+    read -r -p "请输入选项 [0-9]: " choice
     case "${choice}" in
         1) install_flow ;;
         2) show_nodes ;;
-        3) show_client_config ;;
-        4) service_restart ;;
-        5) service_stop ;;
-        6) service_logs ;;
-        7) update_core ;;
-        8) uninstall_flow ;;
+        3) start_web_download ;;
+        4) show_client_config ;;
+        5) service_restart ;;
+        6) service_stop ;;
+        7) service_logs ;;
+        8) update_core ;;
+        9) uninstall_flow ;;
         0) exit 0 ;;
         *) warn "无效选项，请重新输入！"; sleep 1; menu ;;
     esac
@@ -795,6 +863,9 @@ if [[ $# -gt 0 ]]; then
             ;;
         show)
             show_nodes
+            ;;
+        download|web)
+            start_web_download
             ;;
         client)
             show_client_config
