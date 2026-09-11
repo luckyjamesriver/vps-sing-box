@@ -818,6 +818,15 @@ setup_shortcut() {
     fi
     chmod +x "${SCRIPT_PATH}"
 
+    # 同步安装 clean.sh 脚本
+    local clean_script_path="${CONFIG_DIR}/clean.sh"
+    if [[ -f "$(dirname "$0")/clean.sh" ]]; then
+        cp -f "$(dirname "$0")/clean.sh" "${clean_script_path}"
+    else
+        curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/clean.sh?v=$(date +%s)" -o "${clean_script_path}" || true
+    fi
+    [[ -f "${clean_script_path}" ]] && chmod +x "${clean_script_path}"
+
     # 创建快捷命令软链接，覆盖 /usr/bin 与 /usr/local/bin，确保 100% 识别
     ln -sf "${SCRIPT_PATH}" "/usr/bin/vps"
     ln -sf "${SCRIPT_PATH}" "/usr/local/bin/vps"
@@ -843,37 +852,58 @@ install_flow() {
     local old_up="50"
     local old_down="500"
 
-    # 检测是否已存在历史配置
-    if [[ -f "${INFO_FILE}" || -f "${CONFIG_FILE}" ]]; then
-        if [[ -f "${INFO_FILE}" ]]; then
-            user_domain=$(jq -r '.domain // empty' "${INFO_FILE}")
-            old_uuid=$(jq -r '.uuid // empty' "${INFO_FILE}")
-            old_up=$(jq -r '.server_up_mbps // 50' "${INFO_FILE}")
-            old_down=$(jq -r '.server_down_mbps // 500' "${INFO_FILE}")
-        elif [[ -f "${CONFIG_FILE}" ]]; then
-            user_domain=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .tls.server_name // empty' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
-            old_uuid=$(jq -r '.inbounds[] | select(.type=="vless") | .users[0].uuid // empty' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
-        fi
+    # 执行深度非标准配置探查 (支持识别 v2ray-agent, x-ui 等多类历史脚本)
+    if [[ -f "/usr/local/bin/clean.sh" || -f "${CONFIG_DIR}/clean.sh" ]]; then
+        bash -c "run_deep_extractor" 2>/dev/null || true
+    fi
 
-        if [[ -n "${old_uuid}" && "${old_uuid}" != "null" ]]; then
-            title "检测到已有安装记录"
-            echo -e "系统检测到原有配置:"
-            echo -e "  - 域名: ${GREEN}${user_domain}${PLAIN}"
-            echo -e "  - UUID: ${GREEN}${old_uuid}${PLAIN}"
-            echo -e "\n${YELLOW}提示: 保留配置可使手机/电脑客户端无需重新导入任何参数，实现无缝平滑升级！${PLAIN}\n"
+    # 深度搜索可能存在的旧配置
+    local candidate_configs=(
+        "${INFO_FILE}"
+        "${CONFIG_FILE}"
+        "/etc/v2ray-agent/sing-box/conf/config.json"
+        "/etc/v2ray-agent/sing-box/conf/02_VLESS_reality_inbounds.json"
+        "/etc/v2ray-agent/xray/conf/config.json"
+        "/usr/local/etc/sing-box/config.json"
+    )
 
-            read -r -p "是否保留原有配置（域名、UUID、端口、密钥等）平滑升级？[Y/n]: " keep_choice
-            if [[ "${keep_choice}" != "n" && "${keep_choice}" != "N" ]]; then
-                is_reuse="true"
-                info "已选择保留原有配置，执行平滑升级..."
-            else
-                info "已选择重新生成全新随机配置与密钥。"
-                user_domain=""
+    for cfg in "${candidate_configs[@]}"; do
+        if [[ -f "${cfg}" ]]; then
+            if [[ -z "${user_domain}" ]]; then
+                user_domain=$(jq -r '.domain // .tls.server_name // .inbounds[].tls.server_name // empty' "${cfg}" 2>/dev/null | head -n 1)
             fi
+            if [[ -z "${old_uuid}" ]]; then
+                old_uuid=$(jq -r '.uuid // .inbounds[].users[0].uuid // empty' "${cfg}" 2>/dev/null | head -n 1)
+            fi
+            if [[ "${old_up}" == "50" ]]; then
+                old_up=$(jq -r '.server_up_mbps // .inbounds[].up_mbps // .inbounds[].multiplex.brutal.up_mbps // 50' "${cfg}" 2>/dev/null | head -n 1)
+            fi
+            if [[ "${old_down}" == "500" ]]; then
+                old_down=$(jq -r '.server_down_mbps // .inbounds[].down_mbps // .inbounds[].multiplex.brutal.down_mbps // 500' "${cfg}" 2>/dev/null | head -n 1)
+            fi
+        fi
+    done
+
+    # 检测并提示用户继承
+    if [[ -n "${old_uuid}" && "${old_uuid}" != "null" ]]; then
+        title "检测到已有安装记录或历史配置 (支持 v2ray-agent 等平滑迁移)"
+        echo -e "系统检测到原有配置:"
+        [[ -n "${user_domain}" && "${user_domain}" != "null" ]] && echo -e "  - 域名: ${GREEN}${user_domain}${PLAIN}"
+        echo -e "  - UUID: ${GREEN}${old_uuid}${PLAIN}"
+        echo -e "\n${YELLOW}提示: 保留配置可使手机/电脑客户端无需重新导入任何参数，实现无缝平滑升级！${PLAIN}\n"
+
+        read -r -p "是否保留原有配置（域名、UUID、端口、密钥等）平滑升级？[Y/n]: " keep_choice
+        if [[ "${keep_choice}" != "n" && "${keep_choice}" != "N" ]]; then
+            is_reuse="true"
+            info "已选择保留原有配置，执行平滑升级..."
+        else
+            info "已选择重新生成全新随机配置与密钥。"
+            user_domain=""
+            old_uuid=""
         fi
     fi
 
-    if [[ "${is_reuse}" == "true" && -n "${user_domain}" ]]; then
+    if [[ "${is_reuse}" == "true" && -n "${user_domain}" && "${user_domain}" != "null" ]]; then
         echo ""
         read -r -p "确认或修改解析域名 [回车保持为 ${user_domain}]: " input_domain
         user_domain="${input_domain:-${user_domain}}"
@@ -962,6 +992,19 @@ update_core() {
     info "Sing-box 核心更新完毕并已重启服务。"
 }
 
+# --- Call Clean.sh ---
+clean_flow() {
+    check_root
+    info "正在调用一键环境除旧与深度探查工具..."
+    if [[ -f "$(dirname "$0")/clean.sh" ]]; then
+        bash "$(dirname "$0")/clean.sh"
+    elif [[ -f "${CONFIG_DIR}/clean.sh" ]]; then
+        bash "${CONFIG_DIR}/clean.sh"
+    else
+        bash <(curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/clean.sh?v=$(date +%s)")
+    fi
+}
+
 # --- Uninstall Completely ---
 uninstall_flow() {
     check_root
@@ -982,354 +1025,6 @@ uninstall_flow() {
     rm -f "/usr/bin/sb" "/usr/local/bin/sb"
 
     info "Sing-box 已完全从系统中卸载干净。"
-}
-
-# --- Service Definitions & Whitelist for Cleaner ---
-PROTECTED_SERVICES=(
-    "tailscale" "tailscaled" "wireguard" "wg-quick"
-    "nginx" "caddy" "apache2" "httpd" "lighttpd" "openresty"
-    "mysql" "mariadb" "mysqld" "postgresql" "postgres" "redis" "redis-server" "mongod" "mongodb"
-    "php" "php7.4-fpm" "php8.0-fpm" "php8.1-fpm" "php8.2-fpm" "php8.3-fpm" "php-fpm"
-    "docker" "dockerd" "containerd" "podman"
-    "ssh" "sshd" "dropbear"
-    "ufw" "firewalld" "nftables" "iptables" "fail2ban"
-    "cron" "crond" "systemd" "rsyslog" "network" "networking" "resolved" "timesyncd"
-)
-
-LEGACY_PROXY_SERVICES=(
-    "xray" "xray@*" "v2ray" "v2ray@*"
-    "hysteria-server" "hysteria" "hysteria-server@*" "hysteria2"
-    "tuic" "tuic-server" "tuic@*"
-    "shadowsocks" "shadowsocks-libev" "shadowsocks-rust" "shadowsocks-server" "ss-server"
-    "trojan" "trojan-go" "naiveproxy" "naive" "brook" "gost" "snell"
-    "clash" "mihomo" "v2bx" "xrayr"
-)
-
-LEGACY_BIN_PATHS=(
-    "/usr/local/bin/xray" "/usr/bin/xray"
-    "/usr/local/bin/v2ray" "/usr/bin/v2ray"
-    "/usr/local/bin/hysteria" "/usr/bin/hysteria"
-    "/usr/local/bin/tuic-server" "/usr/local/bin/tuic"
-    "/usr/local/bin/trojan-go" "/usr/local/bin/trojan"
-    "/usr/local/bin/ss-server" "/usr/local/bin/ssserver"
-    "/usr/local/bin/naive" "/usr/bin/naive"
-    "/usr/local/bin/brook" "/usr/bin/brook"
-    "/usr/local/bin/gost" "/usr/bin/gost"
-    "/usr/local/bin/snell-server"
-    "/usr/local/bin/clash" "/usr/local/bin/mihomo"
-    "/usr/local/bin/XrayR" "/usr/local/bin/V2bX"
-)
-
-LEGACY_CONFIG_DIRS=(
-    "/etc/xray" "/usr/local/etc/xray"
-    "/etc/v2ray" "/usr/local/etc/v2ray"
-    "/etc/hysteria" "/usr/local/etc/hysteria"
-    "/etc/tuic" "/usr/local/etc/tuic"
-    "/etc/trojan-go" "/etc/trojan"
-    "/etc/shadowsocks" "/etc/shadowsocks-libev" "/etc/shadowsocks-rust"
-    "/etc/clash" "/etc/mihomo"
-    "/etc/XrayR" "/etc/V2bX"
-    "/var/log/xray" "/var/log/v2ray" "/var/log/hysteria"
-)
-
-scan_system_services() {
-    FOUND_PROTECTED=()
-    FOUND_LEGACY_SERVICES=()
-    FOUND_LEGACY_BINS=()
-    FOUND_LEGACY_DIRS=()
-    FOUND_SB=()
-
-    local all_units
-    all_units=$(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' || true)
-
-    for unit in ${all_units}; do
-        local unit_base="${unit%.service}"
-        
-        local is_prot=0
-        for p in "${PROTECTED_SERVICES[@]}"; do
-            if [[ "${unit_base}" == "${p}"* || "${unit}" == "${p}"* ]]; then
-                is_prot=1
-                local active_state
-                active_state=$(systemctl is-active "${unit}" 2>/dev/null || echo "inactive")
-                FOUND_PROTECTED+=("${unit} [${active_state}]")
-                break
-            fi
-        done
-        [[ ${is_prot} -eq 1 ]] && continue
-
-        if [[ "${unit}" == "sing-box.service" || "${unit_base}" == "sing-box" ]]; then
-            local sb_state
-            sb_state=$(systemctl is-active "${unit}" 2>/dev/null || echo "inactive")
-            FOUND_SB+=("${unit} [${sb_state}]")
-            continue
-        fi
-
-        for l in "${LEGACY_PROXY_SERVICES[@]}"; do
-            if [[ "${unit_base}" == ${l} || "${unit}" == ${l}.service ]]; then
-                local l_state
-                l_state=$(systemctl is-active "${unit}" 2>/dev/null || echo "inactive")
-                FOUND_LEGACY_SERVICES+=("${unit} [${l_state}]")
-                break
-            fi
-        done
-    done
-
-    for bin in "${LEGACY_BIN_PATHS[@]}"; do
-        [[ -f "${bin}" ]] && FOUND_LEGACY_BINS+=("${bin}")
-    done
-
-    for dir in "${LEGACY_CONFIG_DIRS[@]}"; do
-        [[ -d "${dir}" ]] && FOUND_LEGACY_DIRS+=("${dir}")
-    done
-}
-
-show_network_ports() {
-    title "当前 VPS 网络监听端口与进程分布"
-    if command -v ss >/dev/null 2>&1; then
-        echo -e "${BLUE}%-6s %-25s %-25s %-20s${PLAIN}" "协议" "本地监听地址:端口" "进程信息" "服务推断"
-        echo -e "----------------------------------------------------------------------------------"
-        ss -tulnp 2>/dev/null | awk 'NR>1 {
-            proto=$1;
-            addr=$5;
-            proc=$7;
-            if (addr ~ /:22$/ || addr ~ /:2222$/) hint="[SSH 远程管理]";
-            else if (addr ~ /:80$/ || addr ~ /:443$/) hint="[Web 网站服务 (Nginx/Caddy)]";
-            else if (addr ~ /:3306$/ || addr ~ /:5432$/ || addr ~ /:6379$/) hint="[数据库服务]";
-            else if (proc ~ /sing-box/) hint="[Sing-box 节点入站]";
-            else if (proc ~ /tailscaled/) hint="[Tailscale Mesh VPN]";
-            else if (proc ~ /xray|v2ray|hysteria|tuic|trojan/) hint="[⚠️ 旧代理服务]";
-            else hint="[系统/其他应用]";
-            printf "%-6s %-25s %-25s %-20s\n", proto, addr, proc, hint;
-        }'
-    fi
-    echo ""
-}
-
-show_scan_report() {
-    title "VPS 环境服务扫描与分类诊断报告"
-
-    echo -e "${GREEN}🛡️  受保护业务与系统服务 (严格隔离保护，绝不改动或损坏):${PLAIN}"
-    if [[ ${#FOUND_PROTECTED[@]} -gt 0 ]]; then
-        for item in "${FOUND_PROTECTED[@]}"; do
-            echo -e "   ✔  ${GREEN}${item}${PLAIN}"
-        done
-    else
-        echo -e "   （未检测到常见的独立 Nginx / MySQL / Tailscale 服务）"
-    fi
-    echo ""
-
-    echo -e "${BLUE}⚡  Sing-box 核心与管理体系:${PLAIN}"
-    if [[ ${#FOUND_SB[@]} -gt 0 || -f "${BIN_PATH}" || -d "${CONFIG_DIR}" ]]; then
-        for item in "${FOUND_SB[@]}"; do
-            echo -e "   ✔  ${BLUE}${item}${PLAIN}"
-        done
-        [[ -f "${BIN_PATH}" ]] && echo -e "   ✔  二进制程序: ${BIN_PATH}"
-        [[ -d "${CONFIG_DIR}" ]] && echo -e "   ✔  配置目录: ${CONFIG_DIR}"
-    else
-        echo -e "   （未检测到 Sing-box 运行环境）"
-    fi
-    echo ""
-
-    echo -e "${RED}🔍  已检测到的旧代理 / 历史遗留残留 (建议除旧清理):${PLAIN}"
-    local legacy_found=0
-
-    if [[ ${#FOUND_LEGACY_SERVICES[@]} -gt 0 ]]; then
-        legacy_found=1
-        echo -e "   【遗留守护服务】"
-        for item in "${FOUND_LEGACY_SERVICES[@]}"; do
-            echo -e "   ❌  ${YELLOW}${item}${PLAIN}"
-        done
-    fi
-
-    if [[ ${#FOUND_LEGACY_BINS[@]} -gt 0 ]]; then
-        legacy_found=1
-        echo -e "   【遗留二进制程序】"
-        for item in "${FOUND_LEGACY_BINS[@]}"; do
-            echo -e "   ❌  ${YELLOW}${item}${PLAIN}"
-        done
-    fi
-
-    if [[ ${#FOUND_LEGACY_DIRS[@]} -gt 0 ]]; then
-        legacy_found=1
-        echo -e "   【遗留配置与日志目录】"
-        for item in "${FOUND_LEGACY_DIRS[@]}"; do
-            echo -e "   ❌  ${YELLOW}${item}${PLAIN}"
-        done
-    fi
-
-    if [[ ${legacy_found} -eq 0 ]]; then
-        echo -e "   ${GREEN}✨ 系统非常干净，未发现常见的第三方旧代理残留！${PLAIN}"
-    fi
-    echo ""
-}
-
-create_clean_backup() {
-    local backup_tar="/root/vps_cleanup_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
-    local items_to_backup=()
-    [[ -d "${CONFIG_DIR}" ]] && items_to_backup+=("${CONFIG_DIR}")
-    for d in "${FOUND_LEGACY_DIRS[@]}"; do
-        [[ -d "${d}" ]] && items_to_backup+=("${d}")
-    done
-    if [[ ${#items_to_backup[@]} -gt 0 ]]; then
-        info "正在为涉及的配置创建归档备份..."
-        tar -czf "${backup_tar}" "${items_to_backup[@]}" 2>/dev/null || true
-        info "备份已保存至: ${YELLOW}${backup_tar}${PLAIN}"
-    fi
-}
-
-clean_legacy_proxies() {
-    title "清理第三方旧代理与遗留组件"
-    if [[ ${#FOUND_LEGACY_SERVICES[@]} -eq 0 && ${#FOUND_LEGACY_BINS[@]} -eq 0 && ${#FOUND_LEGACY_DIRS[@]} -eq 0 ]]; then
-        info "系统中未发现第三方旧代理残留，无需清理。"
-        return 0
-    fi
-
-    echo -e "即将清理以下第三方旧代理组件:"
-    for s in "${FOUND_LEGACY_SERVICES[@]}"; do
-        echo -e "  - 停止并禁用服务: ${RED}${s%% *}${PLAIN}"
-    done
-    for b in "${FOUND_LEGACY_BINS[@]}"; do
-        echo -e "  - 删除执行文件  : ${RED}${b}${PLAIN}"
-    done
-    for d in "${FOUND_LEGACY_DIRS[@]}"; do
-        echo -e "  - 删除配置目录  : ${RED}${d}${PLAIN}"
-    done
-
-    echo ""
-    read -r -p "是否确认清理上述第三方旧代理组件？[y/N]: " confirm
-    if [[ "${confirm}" != "y" && "${confirm}" != "Y" ]]; then
-        warn "已取消清理第三方旧代理。"
-        return 0
-    fi
-
-    create_clean_backup
-
-    for s in "${FOUND_LEGACY_SERVICES[@]}"; do
-        local svc="${s%% *}"
-        info "正在停止并清理服务: ${svc}..."
-        systemctl stop "${svc}" >/dev/null 2>&1 || true
-        systemctl disable "${svc}" >/dev/null 2>&1 || true
-        rm -f "/etc/systemd/system/${svc}" "/lib/systemd/system/${svc}" "/usr/lib/systemd/system/${svc}" >/dev/null 2>&1 || true
-    done
-    systemctl daemon-reload >/dev/null 2>&1 || true
-
-    for b in "${FOUND_LEGACY_BINS[@]}"; do
-        info "正在删除旧程序: ${b}..."
-        rm -f "${b}"
-    done
-
-    for d in "${FOUND_LEGACY_DIRS[@]}"; do
-        info "正在删除旧目录: ${d}..."
-        rm -rf "${d}"
-    done
-
-    info "第三方旧代理与遗留组件清理完毕！"
-}
-
-clean_singbox_env() {
-    title "重置 / 卸载 Sing-box 环境"
-    if [[ ! -f "${BIN_PATH}" && ! -d "${CONFIG_DIR}" && ! -f "${SERVICE_FILE}" ]]; then
-        info "系统中未安装 Sing-box，无需清理。"
-        return 0
-    fi
-
-    echo -e "${YELLOW}请选择 Sing-box 清理模式:${PLAIN}"
-    echo -e "  ${GREEN}1.${PLAIN} 仅重置节点与配置（保留自签 10 年证书，方便无缝重新部署）"
-    echo -e "  ${GREEN}2.${PLAIN} 完全卸载 Sing-box（删除二进制、所有配置文件、证书及快捷命令）"
-    echo -e "  ${GREEN}0.${PLAIN} 取消返回"
-    echo ""
-
-    read -r -p "请输入选项 [0-2]: " sb_choice
-    case "${sb_choice}" in
-        1)
-            read -r -p "确认清空 Sing-box 节点配置并重置？[y/N]: " cf
-            if [[ "${cf}" == "y" || "${cf}" == "Y" ]]; then
-                create_clean_backup
-                systemctl stop sing-box >/dev/null 2>&1 || true
-                rm -f "${CONFIG_FILE}" "${INFO_FILE}"
-                rm -rf "${CLIENT_DIR}" "${CONFIG_DIR}/client_config.json"
-                info "Sing-box 节点与客户端配置已清空，保留了证书文件 (${CERT_PEM})。"
-            fi
-            ;;
-        2)
-            uninstall_flow
-            ;;
-        0|*)
-            info "已取消。"
-            ;;
-    esac
-}
-
-clean_all_deep() {
-    title "全量深度除旧（清理所有旧代理残留 + 完全重置 Sing-box）"
-    echo -e "${RED}⚠️  注意：此操作将清理所有第三方旧代理（Xray/V2Ray/Hysteria/Trojan等）以及 Sing-box 服务！${PLAIN}"
-    echo -e "${GREEN}🛡️  受保护服务（Tailscale、Nginx、Caddy、WordPress、MySQL 等）将得到 100% 绝对保护！${PLAIN}\n"
-
-    read -r -p "是否确认执行全量深度清理？[y/N]: " confirm
-    if [[ "${confirm}" != "y" && "${confirm}" != "Y" ]]; then
-        warn "已取消全量深度清理。"
-        return 0
-    fi
-
-    create_clean_backup
-
-    for s in "${FOUND_LEGACY_SERVICES[@]}"; do
-        local svc="${s%% *}"
-        info "正在停止并清理服务: ${svc}..."
-        systemctl stop "${svc}" >/dev/null 2>&1 || true
-        systemctl disable "${svc}" >/dev/null 2>&1 || true
-        rm -f "/etc/systemd/system/${svc}" "/lib/systemd/system/${svc}" "/usr/lib/systemd/system/${svc}" >/dev/null 2>&1 || true
-    done
-    for b in "${FOUND_LEGACY_BINS[@]}"; do
-        rm -f "${b}"
-    done
-    for d in "${FOUND_LEGACY_DIRS[@]}"; do
-        rm -rf "${d}"
-    done
-
-    systemctl stop sing-box >/dev/null 2>&1 || true
-    systemctl disable sing-box >/dev/null 2>&1 || true
-    rm -f "${SERVICE_FILE}"
-    systemctl daemon-reload
-    rm -f "${BIN_PATH}"
-    rm -rf "${CONFIG_DIR}"
-    rm -f "/usr/bin/vps" "/usr/local/bin/vps" "/usr/bin/sb" "/usr/local/bin/sb"
-
-    info "全量深度除旧完成！VPS 当前代理环境已完全纯净化。"
-}
-
-clean_flow() {
-    check_root
-    scan_system_services
-
-    clear
-    echo -e "${PURPLE}====================================================${PLAIN}"
-    echo -e "${GREEN}        VPS-Sing-box 智能环境除旧与清理工具         ${PLAIN}"
-    echo -e "${BLUE}    GitHub: https://github.com/luckyjamesriver/VPS-Sing-box${PLAIN}"
-    echo -e "${PURPLE}====================================================${PLAIN}"
-
-    show_scan_report
-    show_network_ports
-
-    echo -e "${PURPLE}====================================================${PLAIN}"
-    echo -e "${YELLOW}请选择除旧清理操作:${PLAIN}"
-    echo -e "----------------------------------------------------"
-    echo -e "${GREEN}1.${PLAIN} 仅清理【第三方旧代理残留】(Xray/V2Ray/Hysteria/Trojan等, 保留 Sing-box)"
-    echo -e "${GREEN}2.${PLAIN} 管理与清理【Sing-box 配置 / 卸载】"
-    echo -e "${GREEN}3.${PLAIN} 【全量深度除旧】(清理所有旧代理 + 重置 Sing-box, 为全新安装做准备)"
-    echo -e "${GREEN}4.${PLAIN} 重新刷新扫描系统服务与端口"
-    echo -e "${GREEN}0.${PLAIN} 返回上一级菜单"
-    echo -e "----------------------------------------------------"
-
-    read -r -p "请输入选项 [0-4]: " c_choice
-    case "${c_choice}" in
-        1) clean_legacy_proxies ;;
-        2) clean_singbox_env ;;
-        3) clean_all_deep ;;
-        4) clean_flow ;;
-        0) return 0 ;;
-        *) warn "无效选项！"; sleep 1; clean_flow ;;
-    esac
 }
 
 # --- Management Menu ---
@@ -1355,7 +1050,7 @@ menu() {
     echo -e "${GREEN}6.${PLAIN} 查看 实时运行日志 (退出按 Ctrl+C)"
     echo -e "${GREEN}7.${PLAIN} 更新 管理脚本自身 (Update Script)"
     echo -e "${GREEN}8.${PLAIN} 单独更新 Sing-box 核心版本"
-    echo -e "${GREEN}9.${PLAIN} 一键环境除旧 / 扫描清理旧代理残留 (Clean Old Proxies)"
+    echo -e "${GREEN}9.${PLAIN} 一键环境除旧 / 深度扫描清理旧代理 (Clean Old Proxies)"
     echo -e "${GREEN}10.${PLAIN} 完全卸载 Sing-box"
     echo -e "${GREEN}0.${PLAIN} 退出菜单"
     echo -e "----------------------------------------------------"

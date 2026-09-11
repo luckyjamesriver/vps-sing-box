@@ -124,17 +124,19 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box
 
 ## 🧹 一键环境除旧与旧代理清理 (`clean.sh`)
 
-如果你的 VPS 之前安装过其他各类一键脚本（如旧版 Xray / V2Ray / Hysteria / Trojan / Shadowsocks / Clash 等），或者希望在重新部署前对环境进行全面体检与纯净化，可随时使用我们专门打造的 **独立一键除旧工具**。
+如果你的 VPS 之前安装过其他各类一键脚本（如 `v2ray-agent` / `x-ui` / 旧版 Xray / V2Ray / Hysteria / Trojan / Shadowsocks / Clash 等），或者希望在重新部署前对环境进行全面体检与纯净化，可随时使用我们专门打造的 **独立一键除旧工具**。
 
 ### 🌟 核心设计与安全规范
 1. **🛡️ 严格保护生产与建站业务 (Zero Collateral Damage)**：
    - 具备严格的白名单服务隔离机制，**绝对不触碰、不影响、不损坏**用户在 VPS 上运行的 **Tailscale**、**WireGuard**、Web 网站（**Nginx / Caddy / Apache2 / WordPress**）、数据库（**MySQL / MariaDB / PostgreSQL / Redis**）、**PHP-FPM**、**Docker** 及 SSH 远程管理等关键生产业务。
-2. **🔍 全景网络与服务诊断**：
-   - 智能扫描并列出 VPS 上非系统默认的自安装服务与已知旧代理守护进程。
-   - 自动输出当前 VPS 所有的 TCP / UDP 监听端口、占用进程及用途推断，让网络拓扑一目了然。
-3. **⚡ Sing-box 服务与配置全览**：
-   - 详细展示当前 Sing-box 核心版本、运行状态、各协议监听端口、UUID 及 10 年自签证书有效期。
-4. **🔐 双重确认与自动归档备份**：
+2. **🔍 深度探查非标准路径（如 `v2ray-agent` 等第三方脚本）**：
+   - 不仅检查 `/etc/sing-box`，还深度解析 Systemd 服务的实际 `ExecStart` 执行命令、进程表及非标准路径（如 `/etc/v2ray-agent/sing-box/conf/`、`/etc/x-ui/` 等）。
+3. **🔑 智能凭据提取与跨脚本平滑继承 (Seamless Migration)**：
+   - 自动解析旧 JSON 配置文件中的 **域名、UUID、VLESS Reality 端口与私钥、Hysteria 2 密码与混淆、TUIC 密码及带宽参数**。
+   - 清理前主动询问是否保留并导出为标准化档案（`/etc/sing-box/node_info.json`）。重新安装时**全自动直接继承**，手机与电脑客户端**无需修改任何参数即可直接连通**！
+4. **🌐 全景网络与服务诊断**：
+   - 自动输出当前 VPS 所有的 TCP / UDP 监听端口、占用进程及用途推断（SSH / Web / Tailscale / 旧代理等），让网络拓扑一目了然。
+5. **🔐 双重确认与自动归档备份**：
    - 任何清理操作均要求用户**显式二次输入确认**。
    - 执行清理前自动将原有涉及的配置文件打包归档至 `/root/vps_cleanup_backup_*.tar.gz`，方便随时回滚。
 
