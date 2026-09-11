@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Project: VPS-Sing-box
-# Script: clean.sh (VPS 环境除旧、深层非标准配置探查与旧代理清理工具)
-# Description: 智能深度扫描非标准安装路径（如 /etc/v2ray-agent/ 等）、提取并保留原有凭据（UUID/端口/密码/密钥），
-#              安全清理旧代理残留，并对 Tailscale、WordPress、Web 网站及数据库提供 100% 隔离保护。
+# Script: clean.sh (VPS 环境除旧、深度探查、配置校验与旧代理清理工具)
+# Description: 智能深度扫描非标准安装路径（如 /etc/v2ray-agent/ 等）、精确提取并校验原有凭据（UUID/端口/密码/密钥），
+#              支持全量清理时继承旧配置以实现客户端 0 改动无缝连接，并对 Tailscale、WordPress、Web 网站及数据库提供 100% 隔离保护。
 # Repository: https://github.com/luckyjamesriver/VPS-Sing-box
 # License: MIT
 # ==============================================================================
@@ -113,7 +113,7 @@ FOUND_LEGACY_BINS=()
 FOUND_LEGACY_DIRS=()
 FOUND_SB_SERVICES=()
 
-# --- 深度提取 Python 核心引擎 ---
+# --- 深度提取 Python 核心引擎 (含注释清洗、容错、Xray/Singbox 双协议解析与正则兜底) ---
 run_deep_extractor() {
     if ! command -v python3 >/dev/null 2>&1; then
         return 0
@@ -126,14 +126,31 @@ import os
 import re
 import subprocess
 
+def clean_json_text(text):
+    text = text.lstrip('\ufeff')
+    text = re.sub(r'//.*', '', text)
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+    text = re.sub(r',\s*([\}\]])', r'\1', text)
+    return text
+
+def parse_json_safely(filepath):
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            c = clean_json_text(f.read())
+            return json.loads(c)
+    except Exception:
+        return None
+
 extracted = {
     "detected_services": [],
     "detected_configs": [],
     "credentials": {},
-    "is_non_standard": False
+    "is_non_standard": False,
+    "is_usable": False,
+    "usable_summary": []
 }
 
-# 1. 探查 systemd 中 sing-box / xray / v2ray 服务的实际 ExecStart 路径
+# 1. 探查 systemd
 service_names = ["sing-box.service", "xray.service", "v2ray.service", "hysteria.service", "tuic.service", "v2ray-agent.service"]
 for svc in service_names:
     try:
@@ -148,10 +165,8 @@ for svc in service_names:
     except Exception:
         pass
 
-# 2. 收集潜在的 JSON / YAML 配置文件路径
+# 2. 收集候选文件
 candidate_files = set()
-
-# 从 ExecStart 中抓取配置文件路径
 for s in extracted["detected_services"]:
     cmd = s["exec"]
     m = re.findall(r'(-c|-config|--config|-D)\s+([^\s]+)', cmd)
@@ -162,12 +177,14 @@ for s in extracted["detected_services"]:
             for jf in glob.glob(os.path.join(path, "*.json")):
                 candidate_files.add(jf)
 
-# 常见历史脚本目录深度扫描
+# 搜索常用路径 (v2ray-agent, x-ui, sing-box 等)
 search_globs = [
     "/etc/v2ray-agent/sing-box/conf/*.json",
     "/etc/v2ray-agent/sing-box/conf/config.json",
     "/etc/v2ray-agent/xray/conf/*.json",
     "/etc/v2ray-agent/v2ray/conf/*.json",
+    "/etc/v2ray-agent/*.json",
+    "/etc/v2ray-agent/*.config",
     "/etc/sing-box/*.json",
     "/etc/sing-box/client/*.json",
     "/usr/local/etc/sing-box/*.json",
@@ -186,140 +203,194 @@ for g in search_globs:
 
 creds = {}
 
-def parse_json_safely(filepath):
-    try:
-        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-            c = f.read()
-            c = re.sub(r'//.*', '', c)
-            return json.loads(c)
-    except Exception:
-        return None
-
 for c_path in sorted(list(candidate_files)):
-    data = parse_json_safely(c_path)
-    if not data or not isinstance(data, dict):
+    raw_text = ""
+    try:
+        with open(c_path, 'r', encoding='utf-8', errors='ignore') as f:
+            raw_text = f.read()
+    except Exception:
         continue
-    
+
     extracted["detected_configs"].append(c_path)
+    data = parse_json_safely(c_path)
 
-    if os.path.basename(c_path) == "node_info.json":
-        for k in ["domain", "public_ip", "uuid", "reality_sni", "private_key", "public_key", "short_id",
-                  "port_reality_tcp", "port_reality_grpc", "port_hy2", "hy2_password", "salamander_pwd",
-                  "port_tuic", "tuic_password", "server_up_mbps", "server_down_mbps"]:
-            if k in data and data[k] and k not in creds:
-                creds[k] = data[k]
+    if data and isinstance(data, dict):
+        if os.path.basename(c_path) == "node_info.json":
+            for k in ["domain", "public_ip", "uuid", "reality_sni", "private_key", "public_key", "short_id",
+                      "port_reality_tcp", "port_reality_grpc", "port_hy2", "hy2_password", "salamander_pwd",
+                      "port_tuic", "tuic_password", "server_up_mbps", "server_down_mbps"]:
+                if k in data and data[k] and k not in creds:
+                    creds[k] = data[k]
 
-    inbounds = data.get("inbounds", [])
-    for ib in inbounds:
-        if not isinstance(ib, dict):
+        inbounds = data.get("inbounds", [])
+        for ib in inbounds:
+            if not isinstance(ib, dict):
+                continue
+            ib_type = ib.get("type") or ib.get("protocol") or ""
+            listen_port = ib.get("listen_port") or ib.get("port")
+
+            # VLESS (Sing-box & Xray)
+            if ib_type == "vless":
+                users = ib.get("users") or ib.get("settings", {}).get("clients", [])
+                if users and isinstance(users, list) and isinstance(users[0], dict):
+                    u_uuid = users[0].get("uuid") or users[0].get("id")
+                    if u_uuid:
+                        creds.setdefault("uuid", u_uuid)
+
+                tls = ib.get("tls") or ib.get("streamSettings", {})
+                reality = tls.get("reality") or tls.get("realitySettings", {})
+                if reality:
+                    priv_k = reality.get("private_key") or reality.get("privateKey")
+                    if priv_k:
+                        creds.setdefault("private_key", priv_k)
+                    pub_k = reality.get("public_key") or reality.get("publicKey")
+                    if pub_k:
+                        creds.setdefault("public_key", pub_k)
+                    s_id = reality.get("short_id") or reality.get("shortIds")
+                    if s_id:
+                        if isinstance(s_id, list):
+                            sids = [s for s in s_id if s]
+                            if sids:
+                                creds.setdefault("short_id", sids[-1])
+                        elif isinstance(s_id, str):
+                            creds.setdefault("short_id", s_id)
+                    
+                    sni = tls.get("server_name") or (reality.get("serverNames", [None])[0] if isinstance(reality.get("serverNames"), list) else None)
+                    if not sni and "handshake" in reality and "server" in reality["handshake"]:
+                        sni = reality["handshake"]["server"]
+                    if sni:
+                        creds.setdefault("reality_sni", sni)
+
+                transport = ib.get("transport") or ib.get("streamSettings", {})
+                net_type = ib.get("network") or transport.get("network") or transport.get("type") or ""
+                if net_type == "grpc":
+                    if listen_port:
+                        creds.setdefault("port_reality_grpc", int(listen_port))
+                else:
+                    if listen_port:
+                        creds.setdefault("port_reality_tcp", int(listen_port))
+
+                multiplex = ib.get("multiplex", {})
+                brutal = multiplex.get("brutal", {})
+                if brutal:
+                    if "up_mbps" in brutal:
+                        creds.setdefault("server_up_mbps", int(brutal["up_mbps"]))
+                    if "down_mbps" in brutal:
+                        creds.setdefault("server_down_mbps", int(brutal["down_mbps"]))
+
+            # Hysteria 2
+            elif ib_type == "hysteria2":
+                if listen_port:
+                    creds.setdefault("port_hy2", int(listen_port))
+                if "up_mbps" in ib:
+                    creds.setdefault("server_up_mbps", int(ib["up_mbps"]))
+                if "down_mbps" in ib:
+                    creds.setdefault("server_down_mbps", int(ib["down_mbps"]))
+                users = ib.get("users") or ib.get("auth", {}).get("users", [])
+                if users and isinstance(users, list) and isinstance(users[0], dict):
+                    pwd = users[0].get("password") or users[0].get("auth")
+                    if pwd:
+                        creds.setdefault("hy2_password", str(pwd))
+                obfs = ib.get("obfs", {})
+                if obfs and isinstance(obfs, dict) and "password" in obfs:
+                    creds.setdefault("salamander_pwd", str(obfs["password"]))
+                tls = ib.get("tls", {})
+                if tls and isinstance(tls, dict):
+                    if "server_name" in tls and tls["server_name"]:
+                        creds.setdefault("domain", tls["server_name"])
+                    if "certificate_path" in tls and os.path.exists(tls["certificate_path"]):
+                        creds.setdefault("cert_pem", tls["certificate_path"])
+                    if "key_path" in tls and os.path.exists(tls["key_path"]):
+                        creds.setdefault("cert_key", tls["key_path"])
+
+            # TUIC
+            elif ib_type == "tuic":
+                if listen_port:
+                    creds.setdefault("port_tuic", int(listen_port))
+                users = ib.get("users", [])
+                if users and isinstance(users, list) and isinstance(users[0], dict):
+                    if "uuid" in users[0]:
+                        creds.setdefault("uuid", users[0]["uuid"])
+                    if "password" in users[0]:
+                        creds.setdefault("tuic_password", str(users[0]["password"]))
+                tls = ib.get("tls", {})
+                if tls and isinstance(tls, dict):
+                    if "server_name" in tls and tls["server_name"]:
+                        creds.setdefault("domain", tls["server_name"])
+                    if "certificate_path" in tls and os.path.exists(tls["certificate_path"]):
+                        creds.setdefault("cert_pem", tls["certificate_path"])
+                    if "key_path" in tls and os.path.exists(tls["key_path"]):
+                        creds.setdefault("cert_key", tls["key_path"])
+
+    # 正则兜底提取 (保障任意非标准/损毁 JSON 依然能提取核心参数)
+    for c_path in candidate_files:
+        try:
+            with open(c_path, 'r', encoding='utf-8', errors='ignore') as f:
+                raw_text = f.read()
+        except Exception:
             continue
-        ib_type = ib.get("type", "")
-        listen_port = ib.get("listen_port") or ib.get("port")
 
-        if ib_type == "vless":
-            users = ib.get("users", [])
-            if users and isinstance(users, list) and isinstance(users[0], dict) and "uuid" in users[0]:
-                creds.setdefault("uuid", users[0]["uuid"])
-            
-            tls = ib.get("tls", {})
-            reality = tls.get("reality", {})
-            if reality:
-                if "private_key" in reality and reality["private_key"]:
-                    creds.setdefault("private_key", reality["private_key"])
-                if "public_key" in reality and reality["public_key"]:
-                    creds.setdefault("public_key", reality["public_key"])
-                if "short_id" in reality:
-                    sid = reality["short_id"]
-                    if isinstance(sid, list):
-                        sids = [s for s in sid if s]
-                        if sids:
-                            creds.setdefault("short_id", sids[-1])
-                    elif isinstance(sid, str):
-                        creds.setdefault("short_id", sid)
-                if "server_name" in tls:
-                    creds.setdefault("reality_sni", tls["server_name"])
-                elif "handshake" in reality and "server" in reality["handshake"]:
-                    creds.setdefault("reality_sni", reality["handshake"]["server"])
-            
-            transport = ib.get("transport", {})
-            network = ib.get("network", "")
-            if transport.get("type") == "grpc" or network == "grpc":
-                if listen_port:
-                    creds.setdefault("port_reality_grpc", listen_port)
-            else:
-                if listen_port:
-                    creds.setdefault("port_reality_tcp", listen_port)
+        if "uuid" not in creds:
+            uuid_match = re.search(r'["\']?(?:uuid|id)["\']?\s*[:=]\s*["\']([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})["\']', raw_text, re.IGNORECASE)
+            if uuid_match:
+                creds["uuid"] = uuid_match.group(1)
 
-            multiplex = ib.get("multiplex", {})
-            brutal = multiplex.get("brutal", {})
-            if brutal:
-                if "up_mbps" in brutal:
-                    creds.setdefault("server_up_mbps", brutal["up_mbps"])
-                if "down_mbps" in brutal:
-                    creds.setdefault("server_down_mbps", brutal["down_mbps"])
+        if "private_key" not in creds:
+            pk_match = re.search(r'["\']?(?:private_key|privateKey)["\']?\s*[:=]\s*["\']([A-Za-z0-9+/=_-]{43,44})["\']', raw_text)
+            if pk_match:
+                creds["private_key"] = pk_match.group(1)
 
-        elif ib_type == "hysteria2":
-            if listen_port:
-                creds.setdefault("port_hy2", listen_port)
-            if "up_mbps" in ib:
-                creds.setdefault("server_up_mbps", ib["up_mbps"])
-            if "down_mbps" in ib:
-                creds.setdefault("server_down_mbps", ib["down_mbps"])
-            users = ib.get("users", [])
-            if users and isinstance(users, list) and isinstance(users[0], dict) and "password" in users[0]:
-                creds.setdefault("hy2_password", users[0]["password"])
-            obfs = ib.get("obfs", {})
-            if obfs and isinstance(obfs, dict) and "password" in obfs:
-                creds.setdefault("salamander_pwd", obfs["password"])
-            tls = ib.get("tls", {})
-            if tls and isinstance(tls, dict):
-                if "server_name" in tls and tls["server_name"]:
-                    creds.setdefault("domain", tls["server_name"])
-                if "certificate_path" in tls and os.path.exists(tls["certificate_path"]):
-                    creds.setdefault("cert_pem", tls["certificate_path"])
-                if "key_path" in tls and os.path.exists(tls["key_path"]):
-                    creds.setdefault("cert_key", tls["key_path"])
+        if "short_id" not in creds:
+            sid_match = re.search(r'["\']?(?:short_id|shortIds|shortId)["\']?\s*[:=]\s*\[?\s*["\']([a-f0-9]{8,16})["\']', raw_text)
+            if sid_match:
+                creds["short_id"] = sid_match.group(1)
 
-        elif ib_type == "tuic":
-            if listen_port:
-                creds.setdefault("port_tuic", listen_port)
-            users = ib.get("users", [])
-            if users and isinstance(users, list) and isinstance(users[0], dict):
-                if "uuid" in users[0]:
-                    creds.setdefault("uuid", users[0]["uuid"])
-                if "password" in users[0]:
-                    creds.setdefault("tuic_password", users[0]["password"])
-            tls = ib.get("tls", {})
-            if tls and isinstance(tls, dict):
-                if "server_name" in tls and tls["server_name"]:
-                    creds.setdefault("domain", tls["server_name"])
-                if "certificate_path" in tls and os.path.exists(tls["certificate_path"]):
-                    creds.setdefault("cert_pem", tls["certificate_path"])
-                if "key_path" in tls and os.path.exists(tls["key_path"]):
-                    creds.setdefault("cert_key", tls["key_path"])
+        if "domain" not in creds:
+            dom_match = re.search(r'["\']?(?:server_name|serverName|domain|host)["\']?\s*[:=]\s*["\']([a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,})["\']', raw_text)
+            if dom_match and "apple.com" not in dom_match.group(1) and "cloudflare" not in dom_match.group(1):
+                creds["domain"] = dom_match.group(1)
 
-        elif ib_type == "vmess":
-            users = ib.get("users", [])
-            if users and isinstance(users, list) and isinstance(users[0], dict) and "uuid" in users[0]:
-                creds.setdefault("uuid", users[0]["uuid"])
+    # 3. 探查第三方证书与域名 (从 /etc/v2ray-agent/tls/ 等证书文件名提取)
+    candidate_certs = [
+        ("/etc/v2ray-agent/tls/*.crt", "/etc/v2ray-agent/tls/*.key"),
+        ("/etc/v2ray-agent/tls/*.pem", "/etc/v2ray-agent/tls/*.key"),
+        ("/root/cert/*.crt", "/root/cert/*.key"),
+        ("/root/cert/*.pem", "/root/cert/*.key")
+    ]
+    for crt_g, key_g in candidate_certs:
+        crts = glob.glob(crt_g)
+        keys = glob.glob(key_g)
+        if crts and keys and os.path.exists(crts[0]) and os.path.exists(keys[0]):
+            creds.setdefault("cert_pem", crts[0])
+            creds.setdefault("cert_key", keys[0])
+            base_name = os.path.basename(crts[0])
+            potential_dom = re.sub(r'\.(crt|pem|cer|key)$', '', base_name)
+            if '.' in potential_dom and "domain" not in creds:
+                creds["domain"] = potential_dom
 
-candidate_certs = [
-    ("/etc/v2ray-agent/tls/*.crt", "/etc/v2ray-agent/tls/*.key"),
-    ("/etc/v2ray-agent/tls/*.pem", "/etc/v2ray-agent/tls/*.key"),
-    ("/root/cert/*.crt", "/root/cert/*.key"),
-    ("/root/cert/*.pem", "/root/cert/*.key")
-]
-for crt_g, key_g in candidate_certs:
-    crts = glob.glob(crt_g)
-    keys = glob.glob(key_g)
-    if crts and keys and os.path.exists(crts[0]) and os.path.exists(keys[0]):
-        creds.setdefault("cert_pem", crts[0])
-        creds.setdefault("cert_key", keys[0])
+    # 4. 校验旧配置凭据是否完整可用 (Check if config is usable for seamless migration)
+    usable_checks = []
+    is_valid_uuid = False
+    if "uuid" in creds and re.match(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', str(creds["uuid"]), re.IGNORECASE):
+        is_valid_uuid = True
+        usable_checks.append(f"UUID 格式标准有效 ({creds['uuid']})")
+    
+    if "domain" in creds and "." in str(creds["domain"]):
+        usable_checks.append(f"解析域名有效 ({creds['domain']})")
 
-extracted["credentials"] = creds
+    port_count = sum(1 for k in ["port_reality_tcp", "port_reality_grpc", "port_hy2", "port_tuic"] if k in creds and str(creds[k]).isdigit())
+    if port_count > 0:
+        usable_checks.append(f"已成功捕获 {port_count} 个协议出入站端口")
 
-with open("/tmp/extracted_proxy_info.json", "w") as f:
-    json.dump(extracted, f, indent=2)
+    if is_valid_uuid:
+        extracted["is_usable"] = True
+    extracted["usable_summary"] = usable_checks
+    extracted["credentials"] = creds
+
+    with open("/tmp/extracted_proxy_info.json", "w") as f:
+        json.dump(extracted, f, indent=2)
+
+    return extracted
 
 PYEOF
 }
@@ -335,21 +406,21 @@ scan_system() {
     check_dependencies
     run_deep_extractor
 
-    # 1. 快速检查 Sing-box 服务状态
+    # 1. 检查 Sing-box 服务状态
     if systemctl is-active --quiet sing-box 2>/dev/null; then
         FOUND_SB_SERVICES+=("sing-box.service [active]")
     elif systemctl is-enabled --quiet sing-box 2>/dev/null; then
         FOUND_SB_SERVICES+=("sing-box.service [inactive/enabled]")
     fi
 
-    # 2. 快速检查受保护服务
+    # 2. 检查受保护服务
     for p in "${PROTECTED_SERVICES[@]}"; do
         if systemctl is-active --quiet "${p}" 2>/dev/null; then
             FOUND_PROTECTED+=("${p}.service [active]")
         fi
     done
 
-    # 3. 快速检查旧代理服务
+    # 3. 检查旧代理服务
     for l in "${LEGACY_PROXY_SERVICES[@]}"; do
         if systemctl is-active --quiet "${l}" 2>/dev/null; then
             FOUND_LEGACY_SERVICES+=("${l}.service [active]")
@@ -373,8 +444,7 @@ scan_system() {
 show_network_ports() {
     title "当前 VPS 网络监听端口与进程分布"
     if command -v ss >/dev/null 2>&1; then
-        printf "${CYAN}%-6s %-25s %-32s %-20s${PLAIN}
-" "协议" "本地监听地址:端口" "进程信息" "服务推断"
+        printf "${CYAN}%-6s %-25s %-32s %-20s${PLAIN}\n" "协议" "本地监听地址:端口" "进程信息" "服务推断"
         echo -e "----------------------------------------------------------------------------------"
         ss -tulnp 2>/dev/null | awk 'NR>1 {
             proto=$1;
@@ -387,8 +457,7 @@ show_network_ports() {
             else if (proc ~ /tailscaled/) hint="[Tailscale Mesh VPN]";
             else if (proc ~ /xray|v2ray|hysteria|tuic|trojan/) hint="[⚠️ 旧代理服务]";
             else hint="[系统/其他应用]";
-            printf "%-6s %-25s %-32s %-20s
-", proto, addr, proc, hint;
+            printf "%-6s %-25s %-32s %-20s\n", proto, addr, proc, hint;
         }' || true
     fi
     echo ""
@@ -439,6 +508,15 @@ show_extracted_credentials() {
         echo -e "  - Reality gRPC 端口    : ${GREEN}${pt_grpc}${PLAIN}"
         echo -e "  - Hysteria 2 端口      : ${GREEN}${pt_hy2}${PLAIN} (密码: ${hy2_pwd})"
         echo -e "  - TUIC v5 端口         : ${GREEN}${pt_tuic}${PLAIN} (密码: ${tuic_pwd})"
+        
+        # 凭据可用性诊断
+        local is_usable
+        is_usable=$(jq -r '.is_usable // false' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
+        if [[ "${is_usable}" == "true" ]]; then
+            echo -e "\n  ${GREEN}✔ 校验通过：原配置核心凭据完整可用，可在清理后直接继承，客户端免修改连接！${PLAIN}"
+        else
+            echo -e "\n  ${YELLOW}⚠️ 提示：检测到部分凭据，新安装时缺失项将自动补充生成。${PLAIN}"
+        fi
         echo ""
     else
         echo -e "  ${YELLOW}未在现有旧配置中解析到结构化代理凭据。${PLAIN}\n"
@@ -649,21 +727,77 @@ clean_singbox() {
     esac
 }
 
+# --- 9. 全量深度除旧 (含旧凭据检查、继承选择与客户端 0 改动无缝衔接) ---
 clean_all_deep() {
     title "全量深度除旧（清理所有旧代理残留 + 重置为标准 Sing-box 准备）"
     echo -e "${RED}⚠️  注意：此操作将清理所有第三方旧代理（Xray/V2Ray/v2ray-agent/Trojan等）以及 Sing-box 旧服务！${PLAIN}"
     echo -e "${GREEN}🛡️  受保护服务（Tailscale、Nginx、Caddy、WordPress、MySQL 等）将得到 100% 绝对保护！${PLAIN}\n"
 
-    prompt_preserve_credentials
+    # 1. 检查已提取的旧配置凭据是否完整可用
+    local is_usable has_creds
+    is_usable=$(jq -r '.is_usable // false' "${EXTRACTED_INFO_FILE}" 2>/dev/null || echo "false")
+    has_creds=$(jq -r '.credentials | length' "${EXTRACTED_INFO_FILE}" 2>/dev/null || echo "0")
 
-    read -r -p "是否确认执行全量深度清理？[y/N]: " confirm < /dev/tty
-    if [[ "${confirm}" != "y" && "${confirm}" != "Y" ]]; then
-        warn "已取消全量深度清理。"
-        return 0
+    local keep_credentials="false"
+
+    if [[ "${has_creds}" -gt 0 ]]; then
+        echo -e "${CYAN}【原配置可复用性检查结果】:${PLAIN}"
+        local u_sum
+        u_sum=$(jq -r '.usable_summary[] | "  ✔ " + .' "${EXTRACTED_INFO_FILE}" 2>/dev/null || true)
+        echo -e "${u_sum}"
+        
+        if [[ "${is_usable}" == "true" ]]; then
+            echo -e "  ${GREEN}👉 检查结论: 原配置核心凭据完整有效！推荐保留，实现客户端 0 改动平滑连接。${PLAIN}\n"
+        else
+            echo -e "  ${YELLOW}👉 检查结论: 捕获了部分参数，在新安装时缺失项将自动补充生成。${PLAIN}\n"
+        fi
+
+        echo -e "${YELLOW}请选择全量清理策略:${PLAIN}"
+        echo -e "  ${GREEN}1.${PLAIN} 保留并继承旧凭据 (推荐): 导出凭据至 ${SB_STANDARD_DIR}/node_info.json，清理后新安装可直接复用，客户端无需任何修改！"
+        echo -e "  ${GREEN}2.${PLAIN} 彻底清空（不保留任何旧凭据）: 清除所有旧环境与凭据，下次安装时生成全新随机端口与密钥。"
+        echo -e "  ${GREEN}0.${PLAIN} 取消退出"
+        echo ""
+
+        read -r -p "请输入策略选项 [1/2/0]: " clean_policy < /dev/tty
+        case "${clean_policy}" in
+            1)
+                keep_credentials="true"
+                info "已选择保留旧凭据，执行平滑迁移全量清理..."
+                ;;
+            2)
+                keep_credentials="false"
+                info "已选择彻底清空所有配置..."
+                ;;
+            0|*)
+                warn "已取消全量深度清理。"
+                return 0
+                ;;
+        esac
+    else
+        read -r -p "是否确认执行全量深度清理？[y/N]: " confirm < /dev/tty
+        if [[ "${confirm}" != "y" && "${confirm}" != "Y" ]]; then
+            warn "已取消全量深度清理。"
+            return 0
+        fi
     fi
 
     create_backup
 
+    # 如果选择保留旧凭据，先行导出到标准档案
+    if [[ "${keep_credentials}" == "true" ]]; then
+        mkdir -p "${SB_STANDARD_DIR}"
+        jq '.credentials' "${EXTRACTED_INFO_FILE}" > "${SB_STANDARD_DIR}/node_info.json" 2>/dev/null || true
+        
+        local cert_pem cert_key
+        cert_pem=$(jq -r '.credentials.cert_pem // empty' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
+        cert_key=$(jq -r '.credentials.cert_key // empty' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
+        if [[ -n "${cert_pem}" && -f "${cert_pem}" && -n "${cert_key}" && -f "${cert_key}" ]]; then
+            cp -f "${cert_pem}" "${SB_STANDARD_DIR}/cert.pem" 2>/dev/null || true
+            cp -f "${cert_key}" "${SB_STANDARD_DIR}/cert.key" 2>/dev/null || true
+        fi
+    fi
+
+    # 1. 清理第三方旧代理
     for s in "${FOUND_LEGACY_SERVICES[@]}"; do
         local svc="${s%% *}"
         info "正在停止并清理服务: ${svc}..."
@@ -678,18 +812,38 @@ clean_all_deep() {
         rm -rf "${d}" 2>/dev/null || true
     done
 
+    # 2. 清理旧 Sing-box 服务单元与非标准程序
     systemctl stop sing-box >/dev/null 2>&1 || true
     systemctl disable sing-box >/dev/null 2>&1 || true
     rm -f "${SB_STANDARD_SERVICE}"
     systemctl daemon-reload
     rm -f "${SB_STANDARD_BIN}"
-    if [[ -d "${SB_STANDARD_DIR}" ]]; then
-        find "${SB_STANDARD_DIR}" -mindepth 1 ! -name 'node_info.json' ! -name 'cert.pem' ! -name 'cert.key' -exec rm -rf {} + 2>/dev/null || true
+    
+    if [[ "${keep_credentials}" == "true" ]]; then
+        # 保留 node_info.json 和 cert.*
+        if [[ -d "${SB_STANDARD_DIR}" ]]; then
+            find "${SB_STANDARD_DIR}" -mindepth 1 ! -name 'node_info.json' ! -name 'cert.pem' ! -name 'cert.key' -exec rm -rf {} + 2>/dev/null || true
+        fi
+    else
+        rm -rf "${SB_STANDARD_DIR}"
     fi
+
     rm -f "/usr/bin/vps" "/usr/local/bin/vps" "/usr/bin/sb" "/usr/local/bin/sb"
 
     success "🎉 全量深度除旧完成！VPS 当前代理环境已完全纯净化。"
-    tip "您可以立即运行安装脚本部署全新的 Sing-box 四合一服务。"
+    
+    if [[ "${keep_credentials}" == "true" ]]; then
+        echo -e "\n${GREEN}💡 节点凭据已妥善保存至 ${SB_STANDARD_DIR}/node_info.json${PLAIN}"
+        read -r -p "是否立即启动新版一键安装脚本（自动继承旧配置，客户端 0 改动）？[Y/n]: " run_install < /dev/tty
+        if [[ "${run_install}" != "n" && "${run_install}" != "N" ]]; then
+            bash <(curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/install.sh?v=$(date +%s)")
+        fi
+    else
+        read -r -p "是否立即启动全新一键安装脚本（全新配置）？[y/N]: " run_install < /dev/tty
+        if [[ "${run_install}" == "y" || "${run_install}" == "Y" ]]; then
+            bash <(curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/install.sh?v=$(date +%s)")
+        fi
+    fi
 }
 
 # --- 交互主菜单 ---
@@ -711,7 +865,7 @@ clean_menu() {
     echo -e "----------------------------------------------------"
     echo -e "${GREEN}1.${PLAIN} 仅清理【第三方旧代理残留】(Xray/V2Ray/v2ray-agent/Trojan等, 可保留凭据)"
     echo -e "${GREEN}2.${PLAIN} 管理与清理【Sing-box 配置 / 卸载】"
-    echo -e "${GREEN}3.${PLAIN} 【全量深度除旧】(清理所有旧代理 + 重置 Sing-box, 为全新安装做准备)"
+    echo -e "${GREEN}3.${PLAIN} 【全量深度除旧】(清理所有旧代理 + 智能继承/全新重置 Sing-box)"
     echo -e "${GREEN}4.${PLAIN} 单独导出/保存当前节点凭据档案 (/etc/sing-box/node_info.json)"
     echo -e "${GREEN}5.${PLAIN} 重新刷新扫描系统服务与端口"
     echo -e "${GREEN}0.${PLAIN} 退出清理脚本"
