@@ -373,7 +373,7 @@ scan_system() {
 show_network_ports() {
     title "当前 VPS 网络监听端口与进程分布"
     if command -v ss >/dev/null 2>&1; then
-        echo -e "${CYAN}%-6s %-25s %-25s %-20s${PLAIN}" "协议" "本地监听地址:端口" "进程信息" "服务推断"
+        printf "${CYAN}%-6s %-25s %-25s %-20s${PLAIN}\n" "协议" "本地监听地址:端口" "进程信息" "服务推断"
         echo -e "----------------------------------------------------------------------------------"
         ss -tulnp 2>/dev/null | awk 'NR>1 {
             proto=$1;
