@@ -8,8 +8,6 @@
 # License: MIT
 # ==============================================================================
 
-set -e
-
 # --- Color Constants ---
 RED="\033[31m"
 GREEN="\033[32m"
@@ -32,6 +30,25 @@ check_root() {
     if [[ $EUID -ne 0 ]]; then
         error "此脚本必须以 root 用户运行！请执行: sudo -i 或 sudo bash $0"
         exit 1
+    fi
+}
+
+check_dependencies() {
+    local missing=()
+    for cmd in jq python3 curl; do
+        if ! command -v "${cmd}" >/dev/null 2>&1; then
+            missing+=("${cmd}")
+        fi
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        info "正在自动安装必要依赖 (${missing[*]})..."
+        if command -v apt-get >/dev/null 2>&1; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -y >/dev/null 2>&1 || true
+            apt-get install -y --no-install-recommends "${missing[@]}" >/dev/null 2>&1 || true
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y "${missing[@]}" >/dev/null 2>&1 || true
+        fi
     fi
 }
 
@@ -100,6 +117,10 @@ FOUND_SB_SERVICES=()
 
 # --- 深度提取 Python 核心引擎 ---
 run_deep_extractor() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        return 0
+    fi
+
     python3 - << 'PYEOF'
 import json
 import glob
@@ -321,6 +342,9 @@ scan_system() {
     FOUND_LEGACY_DIRS=()
     FOUND_SB_SERVICES=()
 
+    # 确保基础依赖存在
+    check_dependencies
+
     # 运行深层探查
     run_deep_extractor
 
@@ -392,7 +416,7 @@ show_network_ports() {
             else if (proc ~ /xray|v2ray|hysteria|tuic|trojan/) hint="[⚠️ 旧代理服务]";
             else hint="[系统/其他应用]";
             printf "%-6s %-25s %-25s %-20s\n", proto, addr, proc, hint;
-        }'
+        }' || true
     fi
     echo ""
 }
@@ -404,8 +428,8 @@ show_extracted_credentials() {
     fi
 
     local is_non_standard has_creds
-    is_non_standard=$(jq -r '.is_non_standard // false' "${EXTRACTED_INFO_FILE}")
-    has_creds=$(jq -r '.credentials | length' "${EXTRACTED_INFO_FILE}")
+    is_non_standard=$(jq -r '.is_non_standard // false' "${EXTRACTED_INFO_FILE}" 2>/dev/null || echo "false")
+    has_creds=$(jq -r '.credentials | length' "${EXTRACTED_INFO_FILE}" 2>/dev/null || echo "0")
 
     title "深度探查：已识别的节点与旧配置凭据"
 
@@ -426,16 +450,16 @@ show_extracted_credentials() {
     if [[ "${has_creds}" -gt 0 ]]; then
         echo -e "${CYAN}从旧配置中成功提取的核心凭据参数:${PLAIN}"
         local domain uuid pt_tcp pt_grpc pt_hy2 hy2_pwd pt_tuic tuic_pwd sni sid
-        domain=$(jq -r '.credentials.domain // "未配置"' "${EXTRACTED_INFO_FILE}")
-        uuid=$(jq -r '.credentials.uuid // "未配置"' "${EXTRACTED_INFO_FILE}")
-        pt_tcp=$(jq -r '.credentials.port_reality_tcp // "未配置"' "${EXTRACTED_INFO_FILE}")
-        pt_grpc=$(jq -r '.credentials.port_reality_grpc // "未配置"' "${EXTRACTED_INFO_FILE}")
-        pt_hy2=$(jq -r '.credentials.port_hy2 // "未配置"' "${EXTRACTED_INFO_FILE}")
-        hy2_pwd=$(jq -r '.credentials.hy2_password // "未配置"' "${EXTRACTED_INFO_FILE}")
-        pt_tuic=$(jq -r '.credentials.port_tuic // "未配置"' "${EXTRACTED_INFO_FILE}")
-        tuic_pwd=$(jq -r '.credentials.tuic_password // "未配置"' "${EXTRACTED_INFO_FILE}")
-        sni=$(jq -r '.credentials.reality_sni // "www.apple.com"' "${EXTRACTED_INFO_FILE}")
-        sid=$(jq -r '.credentials.short_id // "未配置"' "${EXTRACTED_INFO_FILE}")
+        domain=$(jq -r '.credentials.domain // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
+        uuid=$(jq -r '.credentials.uuid // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
+        pt_tcp=$(jq -r '.credentials.port_reality_tcp // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
+        pt_grpc=$(jq -r '.credentials.port_reality_grpc // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
+        pt_hy2=$(jq -r '.credentials.port_hy2 // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
+        hy2_pwd=$(jq -r '.credentials.hy2_password // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
+        pt_tuic=$(jq -r '.credentials.port_tuic // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
+        tuic_pwd=$(jq -r '.credentials.tuic_password // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
+        sni=$(jq -r '.credentials.reality_sni // "www.apple.com"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
+        sid=$(jq -r '.credentials.short_id // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
 
         echo -e "  - 域名 (Domain)        : ${GREEN}${domain}${PLAIN}"
         echo -e "  - UUID                 : ${GREEN}${uuid}${PLAIN}"
@@ -455,7 +479,7 @@ prompt_preserve_credentials() {
         return 0
     fi
     local has_creds
-    has_creds=$(jq -r '.credentials | length' "${EXTRACTED_INFO_FILE}")
+    has_creds=$(jq -r '.credentials | length' "${EXTRACTED_INFO_FILE}" 2>/dev/null || echo "0")
     [[ "${has_creds}" -eq 0 ]] && return 0
 
     title "智能凭据继承与保留保护"
@@ -465,15 +489,15 @@ prompt_preserve_credentials() {
     read -r -p "是否保留并导出以上凭据供新安装使用？[Y/n]: " keep_choice
     if [[ "${keep_choice}" != "n" && "${keep_choice}" != "N" ]]; then
         mkdir -p "${SB_STANDARD_DIR}"
-        jq '.credentials' "${EXTRACTED_INFO_FILE}" > "${SB_STANDARD_DIR}/node_info.json"
+        jq '.credentials' "${EXTRACTED_INFO_FILE}" > "${SB_STANDARD_DIR}/node_info.json" 2>/dev/null || true
         
         # 证书备份转移
         local cert_pem cert_key
-        cert_pem=$(jq -r '.credentials.cert_pem // empty' "${EXTRACTED_INFO_FILE}")
-        cert_key=$(jq -r '.credentials.cert_key // empty' "${EXTRACTED_INFO_FILE}")
+        cert_pem=$(jq -r '.credentials.cert_pem // empty' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
+        cert_key=$(jq -r '.credentials.cert_key // empty' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
         if [[ -n "${cert_pem}" && -f "${cert_pem}" && -n "${cert_key}" && -f "${cert_key}" ]]; then
-            cp -f "${cert_pem}" "${SB_STANDARD_DIR}/cert.pem"
-            cp -f "${cert_key}" "${SB_STANDARD_DIR}/cert.key"
+            cp -f "${cert_pem}" "${SB_STANDARD_DIR}/cert.pem" 2>/dev/null || true
+            cp -f "${cert_key}" "${SB_STANDARD_DIR}/cert.key" 2>/dev/null || true
             info "已同步继承原有 TLS 证书至 ${SB_STANDARD_DIR}/cert.pem"
         fi
 
@@ -606,12 +630,12 @@ clean_legacy_proxies() {
 
     for b in "${FOUND_LEGACY_BINS[@]}"; do
         info "正在删除旧程序: ${b}..."
-        rm -f "${b}"
+        rm -f "${b}" 2>/dev/null || true
     done
 
     for d in "${FOUND_LEGACY_DIRS[@]}"; do
         info "正在删除旧目录: ${d}..."
-        rm -rf "${d}"
+        rm -rf "${d}" 2>/dev/null || true
     done
 
     success "第三方旧代理与遗留组件清理完毕！"
@@ -688,10 +712,10 @@ clean_all_deep() {
         rm -f "/etc/systemd/system/${svc}" "/lib/systemd/system/${svc}" "/usr/lib/systemd/system/${svc}" >/dev/null 2>&1 || true
     done
     for b in "${FOUND_LEGACY_BINS[@]}"; do
-        rm -f "${b}"
+        rm -f "${b}" 2>/dev/null || true
     done
     for d in "${FOUND_LEGACY_DIRS[@]}"; do
-        rm -rf "${d}"
+        rm -rf "${d}" 2>/dev/null || true
     done
 
     # 2. 清理旧 Sing-box 服务单元与非标准程序
@@ -715,7 +739,7 @@ clean_menu() {
     check_root
     scan_system
 
-    clear
+    clear 2>/dev/null || true
     echo -e "${PURPLE}====================================================${PLAIN}"
     echo -e "${CYAN}        VPS-Sing-box 智能环境除旧与清理工具         ${PLAIN}"
     echo -e "${BLUE}    GitHub: https://github.com/luckyjamesriver/VPS-Sing-box${PLAIN}"
