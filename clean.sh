@@ -373,7 +373,8 @@ scan_system() {
 show_network_ports() {
     title "当前 VPS 网络监听端口与进程分布"
     if command -v ss >/dev/null 2>&1; then
-        printf "${CYAN}%-6s %-25s %-25s %-20s${PLAIN}\n" "协议" "本地监听地址:端口" "进程信息" "服务推断"
+        printf "${CYAN}%-6s %-25s %-32s %-20s${PLAIN}
+" "协议" "本地监听地址:端口" "进程信息" "服务推断"
         echo -e "----------------------------------------------------------------------------------"
         ss -tulnp 2>/dev/null | awk 'NR>1 {
             proto=$1;
@@ -386,7 +387,8 @@ show_network_ports() {
             else if (proc ~ /tailscaled/) hint="[Tailscale Mesh VPN]";
             else if (proc ~ /xray|v2ray|hysteria|tuic|trojan/) hint="[⚠️ 旧代理服务]";
             else hint="[系统/其他应用]";
-            printf "%-6s %-25s %-25s %-20s\n", proto, addr, proc, hint;
+            printf "%-6s %-25s %-32s %-20s
+", proto, addr, proc, hint;
         }' || true
     fi
     echo ""
