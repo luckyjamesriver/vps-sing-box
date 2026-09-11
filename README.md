@@ -58,7 +58,7 @@
 在你的 VPS 终端（以 root 权限）执行以下命令即可全自动安装：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/vps-sing-box/main/install.sh)
 ```
 
 安装完成后，随时在终端输入快捷命令 **`vps`** 或 **`sb`** 即可唤出交互式管理菜单：
@@ -66,7 +66,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box
 ```text
 ====================================================
          Sing-box 极简全能安装管理脚本               
-    GitHub: https://github.com/luckyjamesriver/VPS-Sing-box
+    GitHub: https://github.com/luckyjamesriver/vps-sing-box
 ====================================================
 服务状态: 正在运行
 ----------------------------------------------------
@@ -134,7 +134,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box
 
 ### ⚡ 运行方式：
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/clean.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/vps-sing-box/main/clean.sh)
 ```
 
 ---

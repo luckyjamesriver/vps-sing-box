@@ -2,7 +2,7 @@
 # ==============================================================================
 # Project: VPS-Sing-box
 # Description: Minimalist, High-Performance, Zero-Maintenance Sing-box Installer
-# Repository: https://github.com/luckyjamesriver/VPS-Sing-box
+# Repository: https://github.com/luckyjamesriver/vps-sing-box
 # License: MIT
 #
 # Supported Protocols (4-in-1):
@@ -814,7 +814,7 @@ setup_shortcut() {
         cp -f "$0" "${SCRIPT_PATH}"
     else
         info "正在安装管理脚本至 ${SCRIPT_PATH}..."
-        curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/install.sh?v=$(date +%s)" -o "${SCRIPT_PATH}"
+        curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/vps-sing-box/main/install.sh?v=$(date +%s)" -o "${SCRIPT_PATH}"
     fi
     chmod +x "${SCRIPT_PATH}"
 
@@ -823,7 +823,7 @@ setup_shortcut() {
     if [[ -f "$(dirname "$0")/clean.sh" ]]; then
         cp -f "$(dirname "$0")/clean.sh" "${clean_script_path}"
     else
-        curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/clean.sh?v=$(date +%s)" -o "${clean_script_path}" || true
+        curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/vps-sing-box/main/clean.sh?v=$(date +%s)" -o "${clean_script_path}" || true
     fi
     [[ -f "${clean_script_path}" ]] && chmod +x "${clean_script_path}"
 
@@ -941,7 +941,7 @@ update_script() {
     info "正在从 GitHub 获取最新版本管理脚本..."
     local temp_file
     temp_file=$(mktemp)
-    if curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/install.sh?v=$(date +%s)" -o "${temp_file}"; then
+    if curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/vps-sing-box/main/install.sh?v=$(date +%s)" -o "${temp_file}"; then
         if [[ -s "${temp_file}" ]]; then
             mv -f "${temp_file}" "${SCRIPT_PATH}"
             chmod +x "${SCRIPT_PATH}"
@@ -980,7 +980,7 @@ clean_flow() {
     elif [[ -f "${CONFIG_DIR}/clean.sh" ]]; then
         bash "${CONFIG_DIR}/clean.sh"
     else
-        bash <(curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/clean.sh?v=$(date +%s)")
+        bash <(curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/vps-sing-box/main/clean.sh?v=$(date +%s)")
     fi
 }
 
@@ -1146,7 +1146,7 @@ menu() {
     clear
     echo -e "${PURPLE}====================================================${PLAIN}"
     echo -e "${GREEN}         Sing-box 极简全能安装管理脚本               ${PLAIN}"
-    echo -e "${BLUE}    GitHub: https://github.com/luckyjamesriver/VPS-Sing-box${PLAIN}"
+    echo -e "${BLUE}    GitHub: https://github.com/luckyjamesriver/vps-sing-box${PLAIN}"
     echo -e "${PURPLE}====================================================${PLAIN}"
 
     if systemctl is-active --quiet sing-box 2>/dev/null; then

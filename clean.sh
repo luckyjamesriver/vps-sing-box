@@ -4,7 +4,7 @@
 # Script: clean.sh (VPS 环境除旧、安全扫描、完整备份与一键恢复工具)
 # Description: 智能扫描 VPS 旧代理残留，提供一键完整备份与一键恢复功能，
 #              全方位保护 Tailscale、WordPress、Web 网站及数据库等生产服务。
-# Repository: https://github.com/luckyjamesriver/VPS-Sing-box
+# Repository: https://github.com/luckyjamesriver/vps-sing-box
 # License: MIT
 # ==============================================================================
 
@@ -521,7 +521,7 @@ clean_all_deep() {
     echo ""
     read -r -p "是否立即启动新版一键安装脚本部署全新的 4合1 服务？[Y/n]: " run_install < /dev/tty
     if [[ "${run_install}" != "n" && "${run_install}" != "N" ]]; then
-        bash <(curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/install.sh?v=$(date +%s)")
+        bash <(curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/vps-sing-box/main/install.sh?v=$(date +%s)")
     fi
 }
 
@@ -530,7 +530,7 @@ clean_menu() {
     clear
     echo -e "${PURPLE}====================================================${PLAIN}"
     echo -e "${GREEN}       VPS 环境安全除旧、完整备份与恢复工具          ${PLAIN}"
-    echo -e "${BLUE}    GitHub: https://github.com/luckyjamesriver/VPS-Sing-box${PLAIN}"
+    echo -e "${BLUE}    GitHub: https://github.com/luckyjamesriver/vps-sing-box${PLAIN}"
     echo -e "${PURPLE}====================================================${PLAIN}"
 
     scan_system
