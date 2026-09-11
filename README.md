@@ -78,7 +78,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box
 6. 查看 实时运行日志 (退出按 Ctrl+C)
 7. 更新 管理脚本自身 (Update Script)
 8. 单独更新 Sing-box 核心版本
-9. 完全卸载 Sing-box
+9. 一键环境除旧 / 扫描清理旧代理残留 (Clean Old Proxies)
+10. 完全卸载 Sing-box
 0. 退出菜单
 ----------------------------------------------------
 ```
@@ -118,6 +119,38 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box
 | Systemd 守护服务 | `/etc/systemd/system/sing-box.service` |
 
 ---
+
+---
+
+## 🧹 一键环境除旧与旧代理清理 (`clean.sh`)
+
+如果你的 VPS 之前安装过其他各类一键脚本（如旧版 Xray / V2Ray / Hysteria / Trojan / Shadowsocks / Clash 等），或者希望在重新部署前对环境进行全面体检与纯净化，可随时使用我们专门打造的 **独立一键除旧工具**。
+
+### 🌟 核心设计与安全规范
+1. **🛡️ 严格保护生产与建站业务 (Zero Collateral Damage)**：
+   - 具备严格的白名单服务隔离机制，**绝对不触碰、不影响、不损坏**用户在 VPS 上运行的 **Tailscale**、**WireGuard**、Web 网站（**Nginx / Caddy / Apache2 / WordPress**）、数据库（**MySQL / MariaDB / PostgreSQL / Redis**）、**PHP-FPM**、**Docker** 及 SSH 远程管理等关键生产业务。
+2. **🔍 全景网络与服务诊断**：
+   - 智能扫描并列出 VPS 上非系统默认的自安装服务与已知旧代理守护进程。
+   - 自动输出当前 VPS 所有的 TCP / UDP 监听端口、占用进程及用途推断，让网络拓扑一目了然。
+3. **⚡ Sing-box 服务与配置全览**：
+   - 详细展示当前 Sing-box 核心版本、运行状态、各协议监听端口、UUID 及 10 年自签证书有效期。
+4. **🔐 双重确认与自动归档备份**：
+   - 任何清理操作均要求用户**显式二次输入确认**。
+   - 执行清理前自动将原有涉及的配置文件打包归档至 `/root/vps_cleanup_backup_*.tar.gz`，方便随时回滚。
+
+### ⚡ 使用方式
+
+#### 独立直接运行（推荐新机体检/旧机清理）：
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/clean.sh)
+```
+
+#### 在已安装节点管理菜单中调用：
+随时在终端输入快捷命令：
+```bash
+vps clean
+# 或在输入 vps 唤出菜单后选择 9. 一键环境除旧
+```
 
 ## ❓ 常见问题 (FAQ)
 
