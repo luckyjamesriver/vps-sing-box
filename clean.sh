@@ -35,13 +35,13 @@ check_root() {
 
 check_dependencies() {
     local missing=()
-    for cmd in jq python3 curl; do
+    for cmd in jq python3 curl ss; do
         if ! command -v "${cmd}" >/dev/null 2>&1; then
             missing+=("${cmd}")
         fi
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
-        info "正在自动安装必要依赖 (${missing[*]})..."
+        info "正在检测并配置基础工具 (${missing[*]})..."
         if command -v apt-get >/dev/null 2>&1; then
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -y >/dev/null 2>&1 || true
@@ -54,14 +54,12 @@ check_dependencies() {
 
 # --- Service Definitions & Whitelist ---
 PROTECTED_SERVICES=(
-    "tailscale" "tailscaled" "wireguard" "wg-quick"
+    "tailscaled" "tailscale" "wg-quick@*" "wireguard"
     "nginx" "caddy" "apache2" "httpd" "lighttpd" "openresty"
-    "mysql" "mariadb" "mysqld" "postgresql" "postgres" "redis" "redis-server" "mongod" "mongodb"
-    "php" "php7.4-fpm" "php8.0-fpm" "php8.1-fpm" "php8.2-fpm" "php8.3-fpm" "php-fpm"
-    "docker" "dockerd" "containerd" "podman"
+    "mysql" "mariadb" "postgresql" "redis" "redis-server" "mongod"
+    "docker" "containerd" "podman"
     "ssh" "sshd" "dropbear"
-    "ufw" "firewalld" "nftables" "iptables" "fail2ban"
-    "cron" "crond" "systemd" "rsyslog" "network" "networking" "resolved" "timesyncd"
+    "ufw" "firewalld" "fail2ban" "cron"
 )
 
 LEGACY_PROXY_SERVICES=(
@@ -153,7 +151,7 @@ for svc in service_names:
 # 2. 收集潜在的 JSON / YAML 配置文件路径
 candidate_files = set()
 
-# 从 ExecStart 中正则抓取配置文件路径
+# 从 ExecStart 中抓取配置文件路径
 for s in extracted["detected_services"]:
     cmd = s["exec"]
     m = re.findall(r'(-c|-config|--config|-D)\s+([^\s]+)', cmd)
@@ -164,7 +162,7 @@ for s in extracted["detected_services"]:
             for jf in glob.glob(os.path.join(path, "*.json")):
                 candidate_files.add(jf)
 
-# 常见历史脚本目录深度扫描 (如 v2ray-agent, x-ui, /etc/sing-box 等)
+# 常见历史脚本目录深度扫描
 search_globs = [
     "/etc/v2ray-agent/sing-box/conf/*.json",
     "/etc/v2ray-agent/sing-box/conf/config.json",
@@ -186,7 +184,6 @@ for g in search_globs:
         if os.path.isfile(f):
             candidate_files.add(f)
 
-# 3. 解析所有收集到的配置文件提取凭据
 creds = {}
 
 def parse_json_safely(filepath):
@@ -205,7 +202,6 @@ for c_path in sorted(list(candidate_files)):
     
     extracted["detected_configs"].append(c_path)
 
-    # 如果是 node_info.json
     if os.path.basename(c_path) == "node_info.json":
         for k in ["domain", "public_ip", "uuid", "reality_sni", "private_key", "public_key", "short_id",
                   "port_reality_tcp", "port_reality_grpc", "port_hy2", "hy2_password", "salamander_pwd",
@@ -213,7 +209,6 @@ for c_path in sorted(list(candidate_files)):
             if k in data and data[k] and k not in creds:
                 creds[k] = data[k]
 
-    # 解析 inbounds
     inbounds = data.get("inbounds", [])
     for ib in inbounds:
         if not isinstance(ib, dict):
@@ -221,7 +216,6 @@ for c_path in sorted(list(candidate_files)):
         ib_type = ib.get("type", "")
         listen_port = ib.get("listen_port") or ib.get("port")
 
-        # VLESS
         if ib_type == "vless":
             users = ib.get("users", [])
             if users and isinstance(users, list) and isinstance(users[0], dict) and "uuid" in users[0]:
@@ -264,7 +258,6 @@ for c_path in sorted(list(candidate_files)):
                 if "down_mbps" in brutal:
                     creds.setdefault("server_down_mbps", brutal["down_mbps"])
 
-        # Hysteria 2
         elif ib_type == "hysteria2":
             if listen_port:
                 creds.setdefault("port_hy2", listen_port)
@@ -287,7 +280,6 @@ for c_path in sorted(list(candidate_files)):
                 if "key_path" in tls and os.path.exists(tls["key_path"]):
                     creds.setdefault("cert_key", tls["key_path"])
 
-        # TUIC
         elif ib_type == "tuic":
             if listen_port:
                 creds.setdefault("port_tuic", listen_port)
@@ -306,13 +298,11 @@ for c_path in sorted(list(candidate_files)):
                 if "key_path" in tls and os.path.exists(tls["key_path"]):
                     creds.setdefault("cert_key", tls["key_path"])
 
-        # VMess / Xray VMess UUID Fallback
         elif ib_type == "vmess":
             users = ib.get("users", [])
             if users and isinstance(users, list) and isinstance(users[0], dict) and "uuid" in users[0]:
                 creds.setdefault("uuid", users[0]["uuid"])
 
-# 4. 探查第三方证书位置 (如 /etc/v2ray-agent/tls/)
 candidate_certs = [
     ("/etc/v2ray-agent/tls/*.crt", "/etc/v2ray-agent/tls/*.key"),
     ("/etc/v2ray-agent/tls/*.pem", "/etc/v2ray-agent/tls/*.key"),
@@ -334,7 +324,7 @@ with open("/tmp/extracted_proxy_info.json", "w") as f:
 PYEOF
 }
 
-# --- 1. 扫描与探测引擎 ---
+# --- 1. 高性能快速扫描引擎 ---
 scan_system() {
     FOUND_PROTECTED=()
     FOUND_LEGACY_SERVICES=()
@@ -342,57 +332,38 @@ scan_system() {
     FOUND_LEGACY_DIRS=()
     FOUND_SB_SERVICES=()
 
-    # 确保基础依赖存在
     check_dependencies
-
-    # 运行深层探查
     run_deep_extractor
 
-    # 扫描 systemd 服务
-    local all_units
-    all_units=$(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' || true)
+    # 1. 快速检查 Sing-box 服务状态
+    if systemctl is-active --quiet sing-box 2>/dev/null; then
+        FOUND_SB_SERVICES+=("sing-box.service [active]")
+    elif systemctl is-enabled --quiet sing-box 2>/dev/null; then
+        FOUND_SB_SERVICES+=("sing-box.service [inactive/enabled]")
+    fi
 
-    for unit in ${all_units}; do
-        local unit_base="${unit%.service}"
-        
-        # 检查是否为受保护生产服务
-        local is_prot=0
-        for p in "${PROTECTED_SERVICES[@]}"; do
-            if [[ "${unit_base}" == "${p}"* || "${unit}" == "${p}"* ]]; then
-                is_prot=1
-                local active_state
-                active_state=$(systemctl is-active "${unit}" 2>/dev/null || echo "inactive")
-                FOUND_PROTECTED+=("${unit} [${active_state}]")
-                break
-            fi
-        done
-        [[ ${is_prot} -eq 1 ]] && continue
-
-        # 检查是否为 Sing-box 服务
-        if [[ "${unit}" == "sing-box.service" || "${unit_base}" == "sing-box" ]]; then
-            local sb_state
-            sb_state=$(systemctl is-active "${unit}" 2>/dev/null || echo "inactive")
-            FOUND_SB_SERVICES+=("${unit} [${sb_state}]")
-            continue
+    # 2. 快速检查受保护服务
+    for p in "${PROTECTED_SERVICES[@]}"; do
+        if systemctl is-active --quiet "${p}" 2>/dev/null; then
+            FOUND_PROTECTED+=("${p}.service [active]")
         fi
-
-        # 检查是否为已知旧代理服务
-        for l in "${LEGACY_PROXY_SERVICES[@]}"; do
-            if [[ "${unit_base}" == ${l} || "${unit}" == ${l}.service ]]; then
-                local l_state
-                l_state=$(systemctl is-active "${unit}" 2>/dev/null || echo "inactive")
-                FOUND_LEGACY_SERVICES+=("${unit} [${l_state}]")
-                break
-            fi
-        done
     done
 
-    # 扫描旧二进制
+    # 3. 快速检查旧代理服务
+    for l in "${LEGACY_PROXY_SERVICES[@]}"; do
+        if systemctl is-active --quiet "${l}" 2>/dev/null; then
+            FOUND_LEGACY_SERVICES+=("${l}.service [active]")
+        elif systemctl is-enabled --quiet "${l}" 2>/dev/null; then
+            FOUND_LEGACY_SERVICES+=("${l}.service [inactive/enabled]")
+        fi
+    done
+
+    # 4. 扫描旧二进制
     for bin in "${LEGACY_BIN_PATHS[@]}"; do
         [[ -f "${bin}" ]] && FOUND_LEGACY_BINS+=("${bin}")
     done
 
-    # 扫描旧目录
+    # 5. 扫描旧目录
     for dir in "${LEGACY_CONFIG_DIRS[@]}"; do
         [[ -d "${dir}" ]] && FOUND_LEGACY_DIRS+=("${dir}")
     done
@@ -433,7 +404,6 @@ show_extracted_credentials() {
 
     title "深度探查：已识别的节点与旧配置凭据"
 
-    # 展示探查到的服务与配置路径
     local detected_svcs detected_cfgs
     detected_svcs=$(jq -r '.detected_services[] | "  - 守护服务: " + .service + " (命令: " + .exec + ")"' "${EXTRACTED_INFO_FILE}" 2>/dev/null || true)
     detected_cfgs=$(jq -r '.detected_configs[] | "  - 配置文件: " + .' "${EXTRACTED_INFO_FILE}" 2>/dev/null || true)
@@ -486,12 +456,11 @@ prompt_preserve_credentials() {
     echo -e "${YELLOW}系统检测到旧配置中存在有效的节点凭据（域名、UUID、端口、密钥等）。${PLAIN}"
     echo -e "${GREEN}💡 推荐保留：将其单独导出为标准档案 (${SB_STANDARD_DIR}/node_info.json)，稍后全新部署时可直接继承使用，手机/电脑客户端无需重新配置！${PLAIN}\n"
 
-    read -r -p "是否保留并导出以上凭据供新安装使用？[Y/n]: " keep_choice
+    read -r -p "是否保留并导出以上凭据供新安装使用？[Y/n]: " keep_choice < /dev/tty
     if [[ "${keep_choice}" != "n" && "${keep_choice}" != "N" ]]; then
         mkdir -p "${SB_STANDARD_DIR}"
         jq '.credentials' "${EXTRACTED_INFO_FILE}" > "${SB_STANDARD_DIR}/node_info.json" 2>/dev/null || true
         
-        # 证书备份转移
         local cert_pem cert_key
         cert_pem=$(jq -r '.credentials.cert_pem // empty' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
         cert_key=$(jq -r '.credentials.cert_key // empty' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
@@ -512,18 +481,16 @@ prompt_preserve_credentials() {
 show_scan_report() {
     title "VPS 环境服务扫描与分类诊断报告"
 
-    # A. 受保护业务服务
     echo -e "${GREEN}🛡️  受保护业务与系统服务 (严格隔离保护，绝不改动或损坏):${PLAIN}"
     if [[ ${#FOUND_PROTECTED[@]} -gt 0 ]]; then
         for item in "${FOUND_PROTECTED[@]}"; do
             echo -e "   ✔  ${GREEN}${item}${PLAIN}"
         done
     else
-        echo -e "   （未检测到常见的独立 Nginx / MySQL / Tailscale 服务）"
+        echo -e "   （未检测到运行中的独立 Nginx / MySQL / Tailscale 等服务）"
     fi
     echo ""
 
-    # B. Sing-box 服务
     echo -e "${CYAN}⚡  Sing-box 核心与管理状态:${PLAIN}"
     if [[ ${#FOUND_SB_SERVICES[@]} -gt 0 || -f "${SB_STANDARD_BIN}" || -d "${SB_STANDARD_DIR}" ]]; then
         for item in "${FOUND_SB_SERVICES[@]}"; do
@@ -536,7 +503,6 @@ show_scan_report() {
     fi
     echo ""
 
-    # C. 检测到的旧代理残留
     echo -e "${RED}🔍  已检测到的旧代理 / 第三方遗留残留 (建议除旧清理):${PLAIN}"
     local legacy_found=0
 
@@ -570,7 +536,6 @@ show_scan_report() {
     echo ""
 }
 
-# --- 6. 创建自动归档备份 ---
 create_backup() {
     local backup_tar="/root/vps_cleanup_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
     local items_to_backup=()
@@ -587,11 +552,9 @@ create_backup() {
     fi
 }
 
-# --- 7. 清理第三方旧代理 ---
 clean_legacy_proxies() {
     title "清理第三方旧代理与遗留组件"
 
-    # 先询问凭据保留
     prompt_preserve_credentials
 
     if [[ ${#FOUND_LEGACY_SERVICES[@]} -eq 0 && ${#FOUND_LEGACY_BINS[@]} -eq 0 && ${#FOUND_LEGACY_DIRS[@]} -eq 0 ]]; then
@@ -611,7 +574,7 @@ clean_legacy_proxies() {
     done
 
     echo ""
-    read -r -p "是否确认清理上述第三方旧代理组件？[y/N]: " confirm
+    read -r -p "是否确认清理上述第三方旧代理组件？[y/N]: " confirm < /dev/tty
     if [[ "${confirm}" != "y" && "${confirm}" != "Y" ]]; then
         warn "已取消清理第三方旧代理。"
         return 0
@@ -641,11 +604,9 @@ clean_legacy_proxies() {
     success "第三方旧代理与遗留组件清理完毕！"
 }
 
-# --- 8. 重置 / 卸载 Sing-box ---
 clean_singbox() {
     title "重置 / 卸载 Sing-box 环境"
 
-    # 先询问凭据保留
     prompt_preserve_credentials
 
     echo -e "${YELLOW}请选择 Sing-box 清理模式:${PLAIN}"
@@ -654,10 +615,10 @@ clean_singbox() {
     echo -e "  ${GREEN}0.${PLAIN} 取消返回"
     echo ""
 
-    read -r -p "请输入选项 [0-2]: " sb_choice
+    read -r -p "请输入选项 [0-2]: " sb_choice < /dev/tty
     case "${sb_choice}" in
         1)
-            read -r -p "确认清空 Sing-box 节点配置并重置？[y/N]: " cf
+            read -r -p "确认清空 Sing-box 节点配置并重置？[y/N]: " cf < /dev/tty
             if [[ "${cf}" == "y" || "${cf}" == "Y" ]]; then
                 create_backup
                 systemctl stop sing-box >/dev/null 2>&1 || true
@@ -667,7 +628,7 @@ clean_singbox() {
             fi
             ;;
         2)
-            read -r -p "确认完全卸载 Sing-box？[y/N]: " cf
+            read -r -p "确认完全卸载 Sing-box？[y/N]: " cf < /dev/tty
             if [[ "${cf}" == "y" || "${cf}" == "Y" ]]; then
                 create_backup
                 systemctl stop sing-box >/dev/null 2>&1 || true
@@ -686,16 +647,14 @@ clean_singbox() {
     esac
 }
 
-# --- 9. 全量深度除旧 (一键除旧迎新) ---
 clean_all_deep() {
     title "全量深度除旧（清理所有旧代理残留 + 重置为标准 Sing-box 准备）"
     echo -e "${RED}⚠️  注意：此操作将清理所有第三方旧代理（Xray/V2Ray/v2ray-agent/Trojan等）以及 Sing-box 旧服务！${PLAIN}"
     echo -e "${GREEN}🛡️  受保护服务（Tailscale、Nginx、Caddy、WordPress、MySQL 等）将得到 100% 绝对保护！${PLAIN}\n"
 
-    # 先询问凭据保留
     prompt_preserve_credentials
 
-    read -r -p "是否确认执行全量深度清理？[y/N]: " confirm
+    read -r -p "是否确认执行全量深度清理？[y/N]: " confirm < /dev/tty
     if [[ "${confirm}" != "y" && "${confirm}" != "Y" ]]; then
         warn "已取消全量深度清理。"
         return 0
@@ -703,7 +662,6 @@ clean_all_deep() {
 
     create_backup
 
-    # 1. 清理第三方旧代理
     for s in "${FOUND_LEGACY_SERVICES[@]}"; do
         local svc="${s%% *}"
         info "正在停止并清理服务: ${svc}..."
@@ -718,13 +676,11 @@ clean_all_deep() {
         rm -rf "${d}" 2>/dev/null || true
     done
 
-    # 2. 清理旧 Sing-box 服务单元与非标准程序
     systemctl stop sing-box >/dev/null 2>&1 || true
     systemctl disable sing-box >/dev/null 2>&1 || true
     rm -f "${SB_STANDARD_SERVICE}"
     systemctl daemon-reload
     rm -f "${SB_STANDARD_BIN}"
-    # 保留 node_info.json 和 cert.*
     if [[ -d "${SB_STANDARD_DIR}" ]]; then
         find "${SB_STANDARD_DIR}" -mindepth 1 ! -name 'node_info.json' ! -name 'cert.pem' ! -name 'cert.key' -exec rm -rf {} + 2>/dev/null || true
     fi
@@ -739,7 +695,6 @@ clean_menu() {
     check_root
     scan_system
 
-    clear 2>/dev/null || true
     echo -e "${PURPLE}====================================================${PLAIN}"
     echo -e "${CYAN}        VPS-Sing-box 智能环境除旧与清理工具         ${PLAIN}"
     echo -e "${BLUE}    GitHub: https://github.com/luckyjamesriver/VPS-Sing-box${PLAIN}"
@@ -760,7 +715,7 @@ clean_menu() {
     echo -e "${GREEN}0.${PLAIN} 退出清理脚本"
     echo -e "----------------------------------------------------"
 
-    read -r -p "请输入选项 [0-5]: " menu_choice
+    read -r -p "请输入选项 [0-5]: " menu_choice < /dev/tty
     case "${menu_choice}" in
         1)
             clean_legacy_proxies
