@@ -28,9 +28,9 @@
    * 原生规则继续阻断 BitTorrent (BT/PT) 版权下载，防止机房 DMCA 投诉。
 4. **纯粹原生无 DNS 依赖架构**：
    * 服务端彻底剔除繁琐且易版本不兼容的 DNS 块，直接交由底层 Linux 系统解析，完全免受 Sing-box 各版本 DNS 语法弃用影响。
-5. **智能无缝平滑升级（保留旧配置 / UUID / 端口 / 密钥）**：
-   * 重新运行安装脚本或升级核心时，脚本**自动识别已有节点配置**，提示用户一键保留原域名、UUID、端口和密钥。
-   * **手机与电脑客户端无需重新扫码或更改配置**，服务重启即可完成无缝升级！
+5. **📦 一键完整备份与一键秒级恢复 (Backup & Restore)**：
+   * 支持一键打包**所有服务端/客户端配置、TLS 证书密钥、主程序二进制以及 Systemd 服务单元**至 `/var/backups/sing-box/`。
+   * 无论重装系统、机器迁移还是意外误删，随时可通过交互式菜单**一键回滚恢复**！
 6. **真正的“零证书维护”体验**：
    * Reality 借用大厂公网证书，完全不需要本地域名证书。
    * Hysteria 2 与 TUIC 采用本地 OpenSSL 生成的 **10 年长效高强度 ECC 证书**，无需申请 Let's Encrypt，**永远不需要担心 90 天证书过期断连**。
@@ -61,7 +61,7 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/install.sh)
 ```
 
-安装完成后，随时在终端输入快捷命令 **`vps`** 即可唤出交互式管理菜单：
+安装完成后，随时在终端输入快捷命令 **`vps`** 或 **`sb`** 即可唤出交互式管理菜单：
 
 ```text
 ====================================================
@@ -76,12 +76,65 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box
 4. 重启 Sing-box 服务
 5. 停止 Sing-box 服务
 6. 查看 实时运行日志 (退出按 Ctrl+C)
-7. 更新 管理脚本自身 (Update Script)
-8. 单独更新 Sing-box 核心版本
-9. 一键环境除旧 / 扫描清理旧代理残留 (Clean Old Proxies)
-10. 完全卸载 Sing-box
+7. 📦 【一键完整备份】Sing-box (配置+证书+密钥+程序)
+8. 🔄 【一键恢复备份】从历史备份还原 Sing-box
+9. 一键环境除旧 / 扫描清理第三方旧代理 (Clean)
+10. 单独更新 Sing-box 核心版本
+11. 更新 管理脚本自身 (Update Script)
+12. 完全卸载 Sing-box
 0. 退出菜单
 ----------------------------------------------------
+```
+
+### 快捷指令大全
+
+| 指令 | 作用说明 |
+| :--- | :--- |
+| `vps` / `sb` | 唤出管理主菜单 |
+| `vps backup` | **一键完整备份当前 Sing-box 环境**（打包至 `/var/backups/sing-box/`） |
+| `vps restore` | **一键恢复历史备份**（列出所有备份档案并支持一键回滚） |
+| `vps show` | 查看节点分享链接与二维码 |
+| `vps client` | 查看客户端完整 `config.json` 配置文件 |
+| `vps status` | 查看 Sing-box 当前运行状态 |
+| `vps restart` | 重启 Sing-box 服务 |
+| `vps stop` | 停止 Sing-box 服务 |
+| `vps log` | 实时追踪查看节点运行日志 |
+| `vps clean` | 调用环境除旧与旧代理扫描清理工具 |
+
+---
+
+## 📦 备份与一键恢复指南
+
+### 1. 创建完整备份
+随时执行 `vps backup` 或在菜单中选择 `7. 📦 一键完整备份`。
+脚本将自动打包：
+- `/etc/sing-box/` 完整目录（所有服务端/客户端配置、证书密钥 `cert.key`/`cert.pem`）
+- `/usr/local/bin/sing-box` 核心主程序
+- `/etc/systemd/system/sing-box.service` 守护进程服务单元
+
+备份文件将安全存放于 `/var/backups/sing-box/sing-box-backup-YYYYMMDD_HHMMSS.tar.gz`。
+
+### 2. 一键秒级还原
+随时执行 `vps restore` 或在菜单中选择 `8. 🔄 一键恢复备份`。
+脚本会自动扫描机器上的所有历史备份档案，用户只需输入对应序号即可瞬间完成所有配置、证书、二进制与服务的完整还原与重启！
+
+---
+
+## 🧹 一键环境除旧与旧代理清理 (`clean.sh`)
+
+如果你的 VPS 之前安装过其他各类一键脚本（如 `v2ray-agent` / `x-ui` / 旧版 Xray / V2Ray / Hysteria / Trojan / Shadowsocks 等），或者希望在重新部署前对环境进行全面体检与纯净化，可随时使用我们专门打造的 **独立一键除旧工具**。
+
+### 🌟 核心设计与安全规范
+1. **🛡️ 严格保护生产与建站业务 (Zero Collateral Damage)**：
+   - 具备严格的白名单服务隔离机制，**绝对不触碰、不影响、不损坏**用户在 VPS 上运行的 **Tailscale**、**WireGuard**、Web 网站（**Nginx / Caddy / Apache2 / WordPress**）、数据库（**MySQL / MariaDB / PostgreSQL / Redis**）、**Docker** 及 SSH 远程管理等关键生产业务。
+2. **🔍 深度探查与清理第三方旧代理**：
+   - 快速扫描并清理常见旧代理守护进程、非标准二进制程序及残留配置目录。
+3. **📦 清理前强制自动备份**：
+   - 任何清理动作执行前均会自动创建完整备份，保障绝对安全，随时可撤销回滚。
+
+### ⚡ 运行方式：
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/clean.sh)
 ```
 
 ---
@@ -98,7 +151,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box
 脚本在服务端独立创建了 `client` 目录，专门存放生成好的客户端配置文件：
 * **文件绝对路径**：`/etc/sing-box/client/config.json`
 * **查看复制**：终端运行 `vps` -> 选择 `3. 查看并复制 客户端完整配置文件`，复制内容保存到电脑/手机即可开箱即用。
-* **SFTP 拖取**：使用 FinalShell / Termius 等 SSH 客户端，直接拖取 `/etc/sing-box/client/config.json` 到本地。
 * 该客户端配置已预置：
   - 本地混合代理入站（`127.0.0.1:2080`，同时支持 HTTP 与 SOCKS5）。
   - 自动测速节点组（`auto`，智能选择延迟最低的节点）。
@@ -117,42 +169,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box
 | 10年自签证书/私钥 | `/etc/sing-box/cert.pem` / `cert.key` |
 | Sing-box 核心二进制 | `/usr/local/bin/sing-box` |
 | Systemd 守护服务 | `/etc/systemd/system/sing-box.service` |
+| 历史备份归档目录 | `/var/backups/sing-box/` |
 
 ---
-
----
-
-## 🧹 一键环境除旧与旧代理清理 (`clean.sh`)
-
-如果你的 VPS 之前安装过其他各类一键脚本（如 `v2ray-agent` / `x-ui` / 旧版 Xray / V2Ray / Hysteria / Trojan / Shadowsocks / Clash 等），或者希望在重新部署前对环境进行全面体检与纯净化，可随时使用我们专门打造的 **独立一键除旧工具**。
-
-### 🌟 核心设计与安全规范
-1. **🛡️ 严格保护生产与建站业务 (Zero Collateral Damage)**：
-   - 具备严格的白名单服务隔离机制，**绝对不触碰、不影响、不损坏**用户在 VPS 上运行的 **Tailscale**、**WireGuard**、Web 网站（**Nginx / Caddy / Apache2 / WordPress**）、数据库（**MySQL / MariaDB / PostgreSQL / Redis**）、**PHP-FPM**、**Docker** 及 SSH 远程管理等关键生产业务。
-2. **🔍 深度探查非标准路径（如 `v2ray-agent` 等第三方脚本）**：
-   - 不仅检查 `/etc/sing-box`，还深度解析 Systemd 服务的实际 `ExecStart` 执行命令、进程表及非标准路径（如 `/etc/v2ray-agent/sing-box/conf/`、`/etc/x-ui/` 等）。
-3. **🔑 智能凭据提取与跨脚本平滑继承 (Seamless Migration)**：
-   - 自动解析旧 JSON 配置文件中的 **域名、UUID、VLESS Reality 端口与私钥、Hysteria 2 密码与混淆、TUIC 密码及带宽参数**。
-   - 清理前主动询问是否保留并导出为标准化档案（`/etc/sing-box/node_info.json`）。重新安装时**全自动直接继承**，手机与电脑客户端**无需修改任何参数即可直接连通**！
-4. **🌐 全景网络与服务诊断**：
-   - 自动输出当前 VPS 所有的 TCP / UDP 监听端口、占用进程及用途推断（SSH / Web / Tailscale / 旧代理等），让网络拓扑一目了然。
-5. **🔐 双重确认与自动归档备份**：
-   - 任何清理操作均要求用户**显式二次输入确认**。
-   - 执行清理前自动将原有涉及的配置文件打包归档至 `/root/vps_cleanup_backup_*.tar.gz`，方便随时回滚。
-
-### ⚡ 使用方式
-
-#### 独立直接运行（推荐新机体检/旧机清理）：
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/clean.sh)
-```
-
-#### 在已安装节点管理菜单中调用：
-随时在终端输入快捷命令：
-```bash
-vps clean
-# 或在输入 vps 唤出菜单后选择 9. 一键环境除旧
-```
 
 ## ❓ 常见问题 (FAQ)
 

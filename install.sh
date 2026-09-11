@@ -852,60 +852,36 @@ install_flow() {
     local old_up="50"
     local old_down="500"
 
-    # 执行深度非标准配置探查 (支持识别 v2ray-agent, x-ui 等多类历史脚本)
-    if [[ -f "/usr/local/bin/clean.sh" || -f "${CONFIG_DIR}/clean.sh" ]]; then
-        bash -c "run_deep_extractor" 2>/dev/null || true
+    # 如果存在本机标准安装配置，支持平滑升级/保留
+    if [[ -f "${INFO_FILE}" ]]; then
+        user_domain=$(jq -r '.domain // empty' "${INFO_FILE}" 2>/dev/null)
+        old_uuid=$(jq -r '.uuid // empty' "${INFO_FILE}" 2>/dev/null)
+        old_up=$(jq -r '.server_up_mbps // 50' "${INFO_FILE}" 2>/dev/null)
+        old_down=$(jq -r '.server_down_mbps // 500' "${INFO_FILE}" 2>/dev/null)
+    elif [[ -f "${CONFIG_FILE}" ]]; then
+        old_uuid=$(jq -r '.inbounds[] | select(.type=="vless") | .users[0].uuid // empty' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+        user_domain=$(jq -r '.inbounds[] | select(.type=="hysteria2" or .type=="tuic") | .tls.server_name // empty' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
     fi
 
-    # 深度搜索可能存在的旧配置
-    local candidate_configs=(
-        "${INFO_FILE}"
-        "${CONFIG_FILE}"
-        "/etc/v2ray-agent/sing-box/conf/config.json"
-        "/etc/v2ray-agent/sing-box/conf/02_VLESS_reality_inbounds.json"
-        "/etc/v2ray-agent/xray/conf/config.json"
-        "/usr/local/etc/sing-box/config.json"
-    )
-
-    for cfg in "${candidate_configs[@]}"; do
-        if [[ -f "${cfg}" ]]; then
-            if [[ -z "${user_domain}" ]]; then
-                user_domain=$(jq -r '.domain // .tls.server_name // .inbounds[].tls.server_name // empty' "${cfg}" 2>/dev/null | head -n 1)
-            fi
-            if [[ -z "${old_uuid}" ]]; then
-                old_uuid=$(jq -r '.uuid // .inbounds[].users[0].uuid // empty' "${cfg}" 2>/dev/null | head -n 1)
-            fi
-            if [[ "${old_up}" == "50" ]]; then
-                old_up=$(jq -r '.server_up_mbps // .inbounds[].up_mbps // .inbounds[].multiplex.brutal.up_mbps // 50' "${cfg}" 2>/dev/null | head -n 1)
-            fi
-            if [[ "${old_down}" == "500" ]]; then
-                old_down=$(jq -r '.server_down_mbps // .inbounds[].down_mbps // .inbounds[].multiplex.brutal.down_mbps // 500' "${cfg}" 2>/dev/null | head -n 1)
-            fi
-        fi
-    done
-
-    # 检测并提示用户继承
-    if [[ -n "${old_uuid}" && "${old_uuid}" != "null" ]]; then
-        title "检测到已有安装记录或历史配置 (支持 v2ray-agent 等平滑迁移)"
-        echo -e "系统检测到原有配置:"
-        [[ -n "${user_domain}" && "${user_domain}" != "null" ]] && echo -e "  - 域名: ${GREEN}${user_domain}${PLAIN}"
+    if [[ -n "${old_uuid}" && -n "${user_domain}" ]]; then
+        title "检测到现有 Sing-box 节点配置"
+        echo -e "已记录配置:"
+        echo -e "  - 域名: ${GREEN}${user_domain}${PLAIN}"
         echo -e "  - UUID: ${GREEN}${old_uuid}${PLAIN}"
-        echo -e "\n${YELLOW}提示: 保留配置可使手机/电脑客户端无需重新导入任何参数，实现无缝平滑升级！${PLAIN}\n"
-
-        read -r -p "是否保留原有配置（域名、UUID、端口、密钥等）平滑升级？[Y/n]: " keep_choice
+        echo ""
+        read -r -p "是否保留现有配置进行平滑升级？[Y/n]: " keep_choice < /dev/tty
         if [[ "${keep_choice}" != "n" && "${keep_choice}" != "N" ]]; then
             is_reuse="true"
-            info "已选择保留原有配置，执行平滑升级..."
+            info "已选择保留现有配置平滑升级。"
         else
-            info "已选择重新生成全新随机配置与密钥。"
+            info "已选择重新生成全新配置与密钥。"
             user_domain=""
             old_uuid=""
         fi
     fi
 
-    if [[ "${is_reuse}" == "true" && -n "${user_domain}" && "${user_domain}" != "null" ]]; then
-        echo ""
-        read -r -p "确认或修改解析域名 [回车保持为 ${user_domain}]: " input_domain
+    if [[ "${is_reuse}" == "true" && -n "${user_domain}" ]]; then
+        read -r -p "确认或修改解析域名 [回车保持为 ${user_domain}]: " input_domain < /dev/tty
         user_domain="${input_domain:-${user_domain}}"
     else
         title "配置 Cloudflare 域名"
@@ -913,7 +889,7 @@ install_flow() {
         echo -e "注意: 请保持 Cloudflare 上的代理状态为 ${YELLOW}仅限 DNS (灰色云朵)${PLAIN}。\n"
 
         while true; do
-            read -r -p "请输入你的域名 (如 node.yourdomain.com): " user_domain
+            read -r -p "请输入你的域名 (如 node.yourdomain.com): " user_domain < /dev/tty
             user_domain=$(echo "${user_domain}" | tr -d "[:space:]")
             if [[ -n "${user_domain}" ]]; then
                 break
@@ -924,9 +900,9 @@ install_flow() {
 
     title "配置 TCP Brutal 与带宽限速参数"
     echo -e "提示: 服务端上行对应客户端下行，服务端下行对应客户端上行。"
-    read -r -p "请输入 VPS 上行带宽限制 up_mbps [回车默认 ${old_up}]: " input_up
+    read -r -p "请输入 VPS 上行带宽限制 up_mbps [回车默认 ${old_up}]: " input_up < /dev/tty
     local server_up_mbps="${input_up:-${old_up}}"
-    read -r -p "请输入 VPS 下行带宽限制 down_mbps [回车默认 ${old_down}]: " input_down
+    read -r -p "请输入 VPS 下行带宽限制 down_mbps [回车默认 ${old_down}]: " input_down < /dev/tty
     local server_down_mbps="${input_down:-${old_down}}"
     info "设定带宽限制: VPS 上行 ${server_up_mbps} Mbps / 下行 ${server_down_mbps} Mbps"
 
@@ -934,6 +910,9 @@ install_flow() {
     generate_configs "${user_domain}" "${public_ip}" "${server_up_mbps}" "${server_down_mbps}" "${is_reuse}"
     start_service
     setup_shortcut
+
+    # 安装完成后自动为用户生成初始安全备份
+    backup_singbox >/dev/null 2>&1 || true
 
     show_nodes
 }
@@ -1027,6 +1006,141 @@ uninstall_flow() {
     info "Sing-box 已完全从系统中卸载干净。"
 }
 
+
+# --- Backup & Restore Handlers ---
+BACKUP_DIR="/var/backups/sing-box"
+
+backup_singbox() {
+    title "执行 Sing-box 一键完整备份"
+    mkdir -p "${BACKUP_DIR}"
+
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_file="${BACKUP_DIR}/sing-box-backup-${timestamp}.tar.gz"
+
+    local backup_items=()
+    [[ -d "${CONFIG_DIR}" ]] && backup_items+=("${CONFIG_DIR}")
+    [[ -f "${BIN_PATH}" ]] && backup_items+=("${BIN_PATH}")
+    [[ -f "${SERVICE_FILE}" ]] && backup_items+=("${SERVICE_FILE}")
+
+    if [[ ${#backup_items[@]} -eq 0 ]]; then
+        warn "未检测到 Sing-box 相关的配置文件或程序，无需创建备份。"
+        return 0
+    fi
+
+    info "正在打包以下核心文件至备份档案:"
+    for bi in "${backup_items[@]}"; do
+        echo -e "  - ${bi}"
+    done
+
+    tar -czf "${backup_file}" "${backup_items[@]}" 2>/dev/null || {
+        error "创建备份失败！请检查磁盘空间与权限。"
+        return 1
+    }
+
+    local b_size
+    b_size=$(du -h "${backup_file}" | awk '{print $1}')
+    success "🎉 Sing-box 完整备份创建成功！"
+    echo -e "  - 备份档案路径: ${GREEN}${backup_file}${PLAIN}"
+    echo -e "  - 档案大小: ${CYAN}${b_size}${PLAIN}"
+    echo -e "  - 备份内容包含: 配置目录(/etc/sing-box), 客户端订阅, 证书密钥, 主程序, Systemd 服务"
+    tip "您可以在任何时候使用【一键恢复】功能将节点完全还原！"
+    echo ""
+}
+
+restore_singbox() {
+    title "Sing-box 一键恢复历史备份"
+
+    local backup_files=()
+    while IFS= read -r f; do
+        [[ -n "${f}" ]] && backup_files+=("${f}")
+    done < <(find "${BACKUP_DIR}" /root /var/backups -maxdepth 2 -type f \( -name "*sing-box*.tar.gz" -o -name "*vps_proxy_backup*.tar.gz" -o -name "pre-clean-backup*.tar.gz" \) 2>/dev/null | sort -r || true)
+
+    if [[ ${#backup_files[@]} -eq 0 ]]; then
+        warn "未在 ${BACKUP_DIR} 或 /root 下检测到任何历史备份文件 (.tar.gz)！"
+        echo ""
+        read -r -p "请输入自定义备份档案的完整绝对路径 (直接回车取消): " custom_path < /dev/tty
+        if [[ -n "${custom_path}" && -f "${custom_path}" ]]; then
+            backup_files=("${custom_path}")
+        else
+            warn "操作已取消。"
+            return 0
+        fi
+    fi
+
+    echo -e "${CYAN}检测到以下历史备份档案，请选择要恢复的版本:${PLAIN}\n"
+    local idx=1
+    for bf in "${backup_files[@]}"; do
+        local f_size f_date
+        f_size=$(du -h "${bf}" 2>/dev/null | awk '{print $1}')
+        f_date=$(date -r "${bf}" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "未知时间")
+        echo -e "  ${GREEN}[${idx}]${PLAIN} ${bf}  (${CYAN}大小: ${f_size}${PLAIN}, 时间: ${f_date})"
+        ((idx++))
+    done
+    echo -e "  ${GREEN}[c]${PLAIN} 手动输入其他备份文件路径"
+    echo -e "  ${GREEN}[0]${PLAIN} 取消返回\n"
+
+    read -r -p "请输入选项编号: " sel < /dev/tty
+    local selected_file=""
+
+    if [[ "${sel}" == "0" ]]; then
+        warn "已取消恢复。"
+        return 0
+    elif [[ "${sel}" == "c" || "${sel}" == "C" ]]; then
+        read -r -p "请输入备份文件绝对路径: " custom_path < /dev/tty
+        if [[ -f "${custom_path}" ]]; then
+            selected_file="${custom_path}"
+        else
+            error "文件不存在: ${custom_path}"
+            return 1
+        fi
+    elif [[ "${sel}" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#backup_files[@]} )); then
+        selected_file="${backup_files[$((sel-1))]}"
+    else
+        warn "无效选项！"
+        return 1
+    fi
+
+    echo ""
+    info "已选中备份档案: ${YELLOW}${selected_file}${PLAIN}"
+    read -r -p "恢复操作将覆盖现有 Sing-box 配置并重启服务，是否确认恢复？[Y/n]: " confirm_restore < /dev/tty
+    if [[ "${confirm_restore}" == "n" || "${confirm_restore}" == "N" ]]; then
+        warn "已取消恢复。"
+        return 0
+    fi
+
+    # 1. 停止当前服务
+    info "正在停止当前 Sing-box 服务..."
+    systemctl stop sing-box >/dev/null 2>&1 || true
+
+    # 2. 解压还原备份
+    info "正在解压并还原文件至根目录..."
+    tar -xzf "${selected_file}" -C / 2>/dev/null || {
+        error "解压备份失败，请检查文件是否损坏！"
+        return 1
+    }
+
+    # 3. 修复文件权限与服务
+    [[ -f "${BIN_PATH}" ]] && chmod +x "${BIN_PATH}"
+    [[ -f "${SCRIPT_PATH}" ]] && chmod +x "${SCRIPT_PATH}"
+    [[ -f "${CERT_KEY}" ]] && chmod 600 "${CERT_KEY}"
+
+    setup_shortcut
+    systemctl daemon-reload
+    systemctl enable sing-box >/dev/null 2>&1 || true
+    systemctl restart sing-box >/dev/null 2>&1 || true
+
+    sleep 1
+
+    if systemctl is-active --quiet sing-box; then
+        success "🎉 恭喜！Sing-box 已从备份成功完整恢复并恢复运行！"
+        echo ""
+        show_nodes
+    else
+        warn "Sing-box 文件已解压恢复，但服务启动未通过。请执行: journalctl -u sing-box -e 查看日志。"
+    fi
+}
+
 # --- Management Menu ---
 menu() {
     clear
@@ -1048,14 +1162,16 @@ menu() {
     echo -e "${GREEN}4.${PLAIN} 重启 Sing-box 服务"
     echo -e "${GREEN}5.${PLAIN} 停止 Sing-box 服务"
     echo -e "${GREEN}6.${PLAIN} 查看 实时运行日志 (退出按 Ctrl+C)"
-    echo -e "${GREEN}7.${PLAIN} 更新 管理脚本自身 (Update Script)"
-    echo -e "${GREEN}8.${PLAIN} 单独更新 Sing-box 核心版本"
-    echo -e "${GREEN}9.${PLAIN} 一键环境除旧 / 深度扫描清理旧代理 (Clean Old Proxies)"
-    echo -e "${GREEN}10.${PLAIN} 完全卸载 Sing-box"
+    echo -e "${GREEN}7.${PLAIN} 📦 【一键完整备份】Sing-box (配置+证书+密钥+程序)"
+    echo -e "${GREEN}8.${PLAIN} 🔄 【一键恢复备份】从历史备份还原 Sing-box"
+    echo -e "${GREEN}9.${PLAIN} 一键环境除旧 / 扫描清理第三方旧代理 (Clean)"
+    echo -e "${GREEN}10.${PLAIN} 单独更新 Sing-box 核心版本"
+    echo -e "${GREEN}11.${PLAIN} 更新 管理脚本自身 (Update Script)"
+    echo -e "${GREEN}12.${PLAIN} 完全卸载 Sing-box"
     echo -e "${GREEN}0.${PLAIN} 退出菜单"
     echo -e "----------------------------------------------------"
 
-    read -r -p "请输入选项 [0-10]: " choice
+    read -r -p "请输入选项 [0-12]: " choice < /dev/tty
     case "${choice}" in
         1) install_flow ;;
         2) show_nodes ;;
@@ -1063,10 +1179,12 @@ menu() {
         4) service_restart ;;
         5) service_stop ;;
         6) service_logs ;;
-        7) update_script ;;
-        8) update_core ;;
+        7) backup_singbox ;;
+        8) restore_singbox ;;
         9) clean_flow ;;
-        10) uninstall_flow ;;
+        10) update_core ;;
+        11) update_script ;;
+        12) uninstall_flow ;;
         0) exit 0 ;;
         *) warn "无效选项，请重新输入！"; sleep 1; menu ;;
     esac
@@ -1083,6 +1201,12 @@ if [[ $# -gt 0 ]]; then
             ;;
         client)
             show_client_config
+            ;;
+        backup)
+            backup_singbox
+            ;;
+        restore)
+            restore_singbox
             ;;
         restart)
             service_restart
@@ -1109,7 +1233,7 @@ if [[ $# -gt 0 ]]; then
             uninstall_flow
             ;;
         *)
-            echo "用法: $0 {install|show|client|restart|stop|status|logs|upgrade|update|clean|uninstall}"
+            echo "用法: $0 {install|show|client|backup|restore|restart|stop|status|logs|upgrade|update|clean|uninstall}"
             exit 1
             ;;
     esac

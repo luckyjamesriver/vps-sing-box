@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Project: VPS-Sing-box
-# Script: clean.sh (VPS 环境除旧、深度探查、配置校验与旧代理清理工具)
-# Description: 智能深度扫描非标准安装路径（如 /etc/v2ray-agent/ 等）、精确提取并校验原有凭据（UUID/端口/密码/密钥），
-#              支持全量清理时继承旧配置以实现客户端 0 改动无缝连接，并对 Tailscale、WordPress、Web 网站及数据库提供 100% 隔离保护。
+# Script: clean.sh (VPS 环境除旧、安全扫描、完整备份与一键恢复工具)
+# Description: 智能扫描 VPS 旧代理残留，提供一键完整备份与一键恢复功能，
+#              全方位保护 Tailscale、WordPress、Web 网站及数据库等生产服务。
 # Repository: https://github.com/luckyjamesriver/VPS-Sing-box
 # License: MIT
 # ==============================================================================
@@ -35,7 +35,7 @@ check_root() {
 
 check_dependencies() {
     local missing=()
-    for cmd in jq python3 curl ss; do
+    for cmd in jq curl ss tar gzip; do
         if ! command -v "${cmd}" >/dev/null 2>&1; then
             missing+=("${cmd}")
         fi
@@ -105,325 +105,53 @@ LEGACY_CONFIG_DIRS=(
 SB_STANDARD_DIR="/etc/sing-box"
 SB_STANDARD_BIN="/usr/local/bin/sing-box"
 SB_STANDARD_SERVICE="/etc/systemd/system/sing-box.service"
-EXTRACTED_INFO_FILE="/tmp/extracted_proxy_info.json"
+BACKUP_DIR="/var/backups/sing-box"
 
 FOUND_PROTECTED=()
 FOUND_LEGACY_SERVICES=()
 FOUND_LEGACY_BINS=()
 FOUND_LEGACY_DIRS=()
 FOUND_SB_SERVICES=()
+FOUND_SB_EXECS=()
 
-# --- 深度提取 Python 核心引擎 (含注释清洗、容错、Xray/Singbox 双协议解析与正则兜底) ---
-run_deep_extractor() {
-    if ! command -v python3 >/dev/null 2>&1; then
-        return 0
-    fi
-
-    python3 - << 'PYEOF'
-import json
-import glob
-import os
-import re
-import subprocess
-
-def clean_json_text(text):
-    text = text.lstrip('\ufeff')
-    text = re.sub(r'//.*', '', text)
-    text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
-    text = re.sub(r',\s*([\}\]])', r'\1', text)
-    return text
-
-def parse_json_safely(filepath):
-    try:
-        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-            c = clean_json_text(f.read())
-            return json.loads(c)
-    except Exception:
-        return None
-
-extracted = {
-    "detected_services": [],
-    "detected_configs": [],
-    "credentials": {},
-    "is_non_standard": False,
-    "is_usable": False,
-    "usable_summary": []
-}
-
-# 1. 探查 systemd
-service_names = ["sing-box.service", "xray.service", "v2ray.service", "hysteria.service", "tuic.service", "v2ray-agent.service"]
-for svc in service_names:
-    try:
-        out = subprocess.check_output(["systemctl", "cat", svc], stderr=subprocess.DEVNULL).decode('utf-8', errors='ignore')
-        for line in out.splitlines():
-            line = line.strip()
-            if line.startswith("ExecStart="):
-                cmd = line.split("=", 1)[1].strip()
-                extracted["detected_services"].append({"service": svc, "exec": cmd})
-                if "/etc/sing-box" not in cmd and "/usr/local/bin/sing-box" not in cmd:
-                    extracted["is_non_standard"] = True
-    except Exception:
-        pass
-
-# 2. 收集候选文件
-candidate_files = set()
-for s in extracted["detected_services"]:
-    cmd = s["exec"]
-    m = re.findall(r'(-c|-config|--config|-D)\s+([^\s]+)', cmd)
-    for flag, path in m:
-        if os.path.isfile(path):
-            candidate_files.add(path)
-        elif os.path.isdir(path):
-            for jf in glob.glob(os.path.join(path, "*.json")):
-                candidate_files.add(jf)
-
-# 搜索常用路径 (v2ray-agent, x-ui, sing-box 等)
-search_globs = [
-    "/etc/v2ray-agent/sing-box/conf/*.json",
-    "/etc/v2ray-agent/sing-box/conf/config.json",
-    "/etc/v2ray-agent/xray/conf/*.json",
-    "/etc/v2ray-agent/v2ray/conf/*.json",
-    "/etc/v2ray-agent/*.json",
-    "/etc/v2ray-agent/*.config",
-    "/etc/sing-box/*.json",
-    "/etc/sing-box/client/*.json",
-    "/usr/local/etc/sing-box/*.json",
-    "/opt/sing-box/*.json",
-    "/etc/xray/*.json",
-    "/etc/v2ray/*.json",
-    "/etc/hysteria/*.json",
-    "/etc/tuic/*.json",
-    "/etc/x-ui/*.json"
-]
-
-for g in search_globs:
-    for f in glob.glob(g):
-        if os.path.isfile(f):
-            candidate_files.add(f)
-
-creds = {}
-
-for c_path in sorted(list(candidate_files)):
-    raw_text = ""
-    try:
-        with open(c_path, 'r', encoding='utf-8', errors='ignore') as f:
-            raw_text = f.read()
-    except Exception:
-        continue
-
-    extracted["detected_configs"].append(c_path)
-    data = parse_json_safely(c_path)
-
-    if data and isinstance(data, dict):
-        if os.path.basename(c_path) == "node_info.json":
-            for k in ["domain", "public_ip", "uuid", "reality_sni", "private_key", "public_key", "short_id",
-                      "port_reality_tcp", "port_reality_grpc", "port_hy2", "hy2_password", "salamander_pwd",
-                      "port_tuic", "tuic_password", "server_up_mbps", "server_down_mbps"]:
-                if k in data and data[k] and k not in creds:
-                    creds[k] = data[k]
-
-        inbounds = data.get("inbounds", [])
-        for ib in inbounds:
-            if not isinstance(ib, dict):
-                continue
-            ib_type = ib.get("type") or ib.get("protocol") or ""
-            listen_port = ib.get("listen_port") or ib.get("port")
-
-            # VLESS (Sing-box & Xray)
-            if ib_type == "vless":
-                users = ib.get("users") or ib.get("settings", {}).get("clients", [])
-                if users and isinstance(users, list) and isinstance(users[0], dict):
-                    u_uuid = users[0].get("uuid") or users[0].get("id")
-                    if u_uuid:
-                        creds.setdefault("uuid", u_uuid)
-
-                tls = ib.get("tls") or ib.get("streamSettings", {})
-                reality = tls.get("reality") or tls.get("realitySettings", {})
-                if reality:
-                    priv_k = reality.get("private_key") or reality.get("privateKey")
-                    if priv_k:
-                        creds.setdefault("private_key", priv_k)
-                    pub_k = reality.get("public_key") or reality.get("publicKey")
-                    if pub_k:
-                        creds.setdefault("public_key", pub_k)
-                    s_id = reality.get("short_id") or reality.get("shortIds")
-                    if s_id:
-                        if isinstance(s_id, list):
-                            sids = [s for s in s_id if s]
-                            if sids:
-                                creds.setdefault("short_id", sids[-1])
-                        elif isinstance(s_id, str):
-                            creds.setdefault("short_id", s_id)
-                    
-                    sni = tls.get("server_name") or (reality.get("serverNames", [None])[0] if isinstance(reality.get("serverNames"), list) else None)
-                    if not sni and "handshake" in reality and "server" in reality["handshake"]:
-                        sni = reality["handshake"]["server"]
-                    if sni:
-                        creds.setdefault("reality_sni", sni)
-
-                transport = ib.get("transport") or ib.get("streamSettings", {})
-                net_type = ib.get("network") or transport.get("network") or transport.get("type") or ""
-                if net_type == "grpc":
-                    if listen_port:
-                        creds.setdefault("port_reality_grpc", int(listen_port))
-                else:
-                    if listen_port:
-                        creds.setdefault("port_reality_tcp", int(listen_port))
-
-                multiplex = ib.get("multiplex", {})
-                brutal = multiplex.get("brutal", {})
-                if brutal:
-                    if "up_mbps" in brutal:
-                        creds.setdefault("server_up_mbps", int(brutal["up_mbps"]))
-                    if "down_mbps" in brutal:
-                        creds.setdefault("server_down_mbps", int(brutal["down_mbps"]))
-
-            # Hysteria 2
-            elif ib_type == "hysteria2":
-                if listen_port:
-                    creds.setdefault("port_hy2", int(listen_port))
-                if "up_mbps" in ib:
-                    creds.setdefault("server_up_mbps", int(ib["up_mbps"]))
-                if "down_mbps" in ib:
-                    creds.setdefault("server_down_mbps", int(ib["down_mbps"]))
-                users = ib.get("users") or ib.get("auth", {}).get("users", [])
-                if users and isinstance(users, list) and isinstance(users[0], dict):
-                    pwd = users[0].get("password") or users[0].get("auth")
-                    if pwd:
-                        creds.setdefault("hy2_password", str(pwd))
-                obfs = ib.get("obfs", {})
-                if obfs and isinstance(obfs, dict) and "password" in obfs:
-                    creds.setdefault("salamander_pwd", str(obfs["password"]))
-                tls = ib.get("tls", {})
-                if tls and isinstance(tls, dict):
-                    if "server_name" in tls and tls["server_name"]:
-                        creds.setdefault("domain", tls["server_name"])
-                    if "certificate_path" in tls and os.path.exists(tls["certificate_path"]):
-                        creds.setdefault("cert_pem", tls["certificate_path"])
-                    if "key_path" in tls and os.path.exists(tls["key_path"]):
-                        creds.setdefault("cert_key", tls["key_path"])
-
-            # TUIC
-            elif ib_type == "tuic":
-                if listen_port:
-                    creds.setdefault("port_tuic", int(listen_port))
-                users = ib.get("users", [])
-                if users and isinstance(users, list) and isinstance(users[0], dict):
-                    if "uuid" in users[0]:
-                        creds.setdefault("uuid", users[0]["uuid"])
-                    if "password" in users[0]:
-                        creds.setdefault("tuic_password", str(users[0]["password"]))
-                tls = ib.get("tls", {})
-                if tls and isinstance(tls, dict):
-                    if "server_name" in tls and tls["server_name"]:
-                        creds.setdefault("domain", tls["server_name"])
-                    if "certificate_path" in tls and os.path.exists(tls["certificate_path"]):
-                        creds.setdefault("cert_pem", tls["certificate_path"])
-                    if "key_path" in tls and os.path.exists(tls["key_path"]):
-                        creds.setdefault("cert_key", tls["key_path"])
-
-    # 正则兜底提取 (保障任意非标准/损毁 JSON 依然能提取核心参数)
-    for c_path in candidate_files:
-        try:
-            with open(c_path, 'r', encoding='utf-8', errors='ignore') as f:
-                raw_text = f.read()
-        except Exception:
-            continue
-
-        if "uuid" not in creds:
-            uuid_match = re.search(r'["\']?(?:uuid|id)["\']?\s*[:=]\s*["\']([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})["\']', raw_text, re.IGNORECASE)
-            if uuid_match:
-                creds["uuid"] = uuid_match.group(1)
-
-        if "private_key" not in creds:
-            pk_match = re.search(r'["\']?(?:private_key|privateKey)["\']?\s*[:=]\s*["\']([A-Za-z0-9+/=_-]{43,44})["\']', raw_text)
-            if pk_match:
-                creds["private_key"] = pk_match.group(1)
-
-        if "short_id" not in creds:
-            sid_match = re.search(r'["\']?(?:short_id|shortIds|shortId)["\']?\s*[:=]\s*\[?\s*["\']([a-f0-9]{8,16})["\']', raw_text)
-            if sid_match:
-                creds["short_id"] = sid_match.group(1)
-
-        if "domain" not in creds:
-            dom_match = re.search(r'["\']?(?:server_name|serverName|domain|host)["\']?\s*[:=]\s*["\']([a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,})["\']', raw_text)
-            if dom_match and "apple.com" not in dom_match.group(1) and "cloudflare" not in dom_match.group(1):
-                creds["domain"] = dom_match.group(1)
-
-    # 3. 探查第三方证书与域名 (从 /etc/v2ray-agent/tls/ 等证书文件名提取)
-    candidate_certs = [
-        ("/etc/v2ray-agent/tls/*.crt", "/etc/v2ray-agent/tls/*.key"),
-        ("/etc/v2ray-agent/tls/*.pem", "/etc/v2ray-agent/tls/*.key"),
-        ("/root/cert/*.crt", "/root/cert/*.key"),
-        ("/root/cert/*.pem", "/root/cert/*.key")
-    ]
-    for crt_g, key_g in candidate_certs:
-        crts = glob.glob(crt_g)
-        keys = glob.glob(key_g)
-        if crts and keys and os.path.exists(crts[0]) and os.path.exists(keys[0]):
-            creds.setdefault("cert_pem", crts[0])
-            creds.setdefault("cert_key", keys[0])
-            base_name = os.path.basename(crts[0])
-            potential_dom = re.sub(r'\.(crt|pem|cer|key)$', '', base_name)
-            if '.' in potential_dom and "domain" not in creds:
-                creds["domain"] = potential_dom
-
-    # 4. 校验旧配置凭据是否完整可用 (Check if config is usable for seamless migration)
-    usable_checks = []
-    is_valid_uuid = False
-    if "uuid" in creds and re.match(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', str(creds["uuid"]), re.IGNORECASE):
-        is_valid_uuid = True
-        usable_checks.append(f"UUID 格式标准有效 ({creds['uuid']})")
-    
-    if "domain" in creds and "." in str(creds["domain"]):
-        usable_checks.append(f"解析域名有效 ({creds['domain']})")
-
-    port_count = sum(1 for k in ["port_reality_tcp", "port_reality_grpc", "port_hy2", "port_tuic"] if k in creds and str(creds[k]).isdigit())
-    if port_count > 0:
-        usable_checks.append(f"已成功捕获 {port_count} 个协议出入站端口")
-
-    if is_valid_uuid:
-        extracted["is_usable"] = True
-    extracted["usable_summary"] = usable_checks
-    extracted["credentials"] = creds
-
-    with open("/tmp/extracted_proxy_info.json", "w") as f:
-        json.dump(extracted, f, indent=2)
-
-PYEOF
-}
-
-# --- 1. 高性能快速扫描引擎 ---
+# --- 1. 高性能系统服务与进程探查 ---
 scan_system() {
     FOUND_PROTECTED=()
     FOUND_LEGACY_SERVICES=()
     FOUND_LEGACY_BINS=()
     FOUND_LEGACY_DIRS=()
     FOUND_SB_SERVICES=()
+    FOUND_SB_EXECS=()
 
     check_dependencies
-    run_deep_extractor
 
-    # 1. 检查 Sing-box 服务状态
+    # 1. 检查 Sing-box 服务状态与运行文件
     if systemctl is-active --quiet sing-box 2>/dev/null; then
-        FOUND_SB_SERVICES+=("sing-box.service [active]")
+        FOUND_SB_SERVICES+=("sing-box.service [运行中]")
     elif systemctl is-enabled --quiet sing-box 2>/dev/null; then
-        FOUND_SB_SERVICES+=("sing-box.service [inactive/enabled]")
+        FOUND_SB_SERVICES+=("sing-box.service [已安装/未运行]")
+    fi
+
+    # 探查 sing-box 执行命令
+    local sb_exec
+    sb_exec=$(systemctl cat sing-box.service 2>/dev/null | grep -E '^ExecStart=' | cut -d'=' -f2- | head -n 1 || true)
+    if [[ -n "${sb_exec}" ]]; then
+        FOUND_SB_EXECS+=("${sb_exec}")
     fi
 
     # 2. 检查受保护服务
     for p in "${PROTECTED_SERVICES[@]}"; do
         if systemctl is-active --quiet "${p}" 2>/dev/null; then
-            FOUND_PROTECTED+=("${p}.service [active]")
+            FOUND_PROTECTED+=("${p}.service [运行中]")
         fi
     done
 
     # 3. 检查旧代理服务
     for l in "${LEGACY_PROXY_SERVICES[@]}"; do
         if systemctl is-active --quiet "${l}" 2>/dev/null; then
-            FOUND_LEGACY_SERVICES+=("${l}.service [active]")
+            FOUND_LEGACY_SERVICES+=("${l}.service [运行中]")
         elif systemctl is-enabled --quiet "${l}" 2>/dev/null; then
-            FOUND_LEGACY_SERVICES+=("${l}.service [inactive/enabled]")
+            FOUND_LEGACY_SERVICES+=("${l}.service [已安装/未运行]")
         fi
     done
 
@@ -451,7 +179,7 @@ show_network_ports() {
             if (addr ~ /:22$/ || addr ~ /:2222$/) hint="[SSH 远程管理]";
             else if (addr ~ /:80$/ || addr ~ /:443$/) hint="[Web 网站服务 (Nginx/Caddy)]";
             else if (addr ~ /:3306$/ || addr ~ /:5432$/ || addr ~ /:6379$/) hint="[数据库服务]";
-            else if (proc ~ /sing-box/) hint="[Sing-box 节点入站]";
+            else if (proc ~ /sing-box/) hint="[Sing-box 代理入站]";
             else if (proc ~ /tailscaled/) hint="[Tailscale Mesh VPN]";
             else if (proc ~ /xray|v2ray|hysteria|tuic|trojan/) hint="[⚠️ 旧代理服务]";
             else hint="[系统/其他应用]";
@@ -461,101 +189,7 @@ show_network_ports() {
     echo ""
 }
 
-# --- 3. 展示探查到的凭据与详情 ---
-show_extracted_credentials() {
-    if [[ ! -f "${EXTRACTED_INFO_FILE}" ]]; then
-        return 0
-    fi
-
-    local is_non_standard has_creds
-    is_non_standard=$(jq -r '.is_non_standard // false' "${EXTRACTED_INFO_FILE}" 2>/dev/null || echo "false")
-    has_creds=$(jq -r '.credentials | length' "${EXTRACTED_INFO_FILE}" 2>/dev/null || echo "0")
-
-    title "深度探查：已识别的节点与旧配置凭据"
-
-    local detected_svcs detected_cfgs
-    detected_svcs=$(jq -r '.detected_services[] | "  - 守护服务: " + .service + " (命令: " + .exec + ")"' "${EXTRACTED_INFO_FILE}" 2>/dev/null || true)
-    detected_cfgs=$(jq -r '.detected_configs[] | "  - 配置文件: " + .' "${EXTRACTED_INFO_FILE}" 2>/dev/null || true)
-
-    if [[ -n "${detected_svcs}" ]]; then
-        echo -e "${YELLOW}已定位的运行服务与执行命令:${PLAIN}"
-        echo -e "${detected_svcs}\n"
-    fi
-    if [[ -n "${detected_cfgs}" ]]; then
-        echo -e "${YELLOW}已定位的配置与证书文件:${PLAIN}"
-        echo -e "${detected_cfgs}\n"
-    fi
-
-    if [[ "${has_creds}" -gt 0 ]]; then
-        echo -e "${CYAN}从旧配置中成功提取的核心凭据参数:${PLAIN}"
-        local domain uuid pt_tcp pt_grpc pt_hy2 hy2_pwd pt_tuic tuic_pwd sni sid
-        domain=$(jq -r '.credentials.domain // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
-        uuid=$(jq -r '.credentials.uuid // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
-        pt_tcp=$(jq -r '.credentials.port_reality_tcp // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
-        pt_grpc=$(jq -r '.credentials.port_reality_grpc // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
-        pt_hy2=$(jq -r '.credentials.port_hy2 // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
-        hy2_pwd=$(jq -r '.credentials.hy2_password // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
-        pt_tuic=$(jq -r '.credentials.port_tuic // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
-        tuic_pwd=$(jq -r '.credentials.tuic_password // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
-        sni=$(jq -r '.credentials.reality_sni // "www.apple.com"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
-        sid=$(jq -r '.credentials.short_id // "未配置"' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
-
-        echo -e "  - 域名 (Domain)        : ${GREEN}${domain}${PLAIN}"
-        echo -e "  - UUID                 : ${GREEN}${uuid}${PLAIN}"
-        echo -e "  - Reality TCP 端口     : ${GREEN}${pt_tcp}${PLAIN} (SNI: ${sni}, ShortID: ${sid})"
-        echo -e "  - Reality gRPC 端口    : ${GREEN}${pt_grpc}${PLAIN}"
-        echo -e "  - Hysteria 2 端口      : ${GREEN}${pt_hy2}${PLAIN} (密码: ${hy2_pwd})"
-        echo -e "  - TUIC v5 端口         : ${GREEN}${pt_tuic}${PLAIN} (密码: ${tuic_pwd})"
-        
-        # 凭据可用性诊断
-        local is_usable
-        is_usable=$(jq -r '.is_usable // false' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
-        if [[ "${is_usable}" == "true" ]]; then
-            echo -e "\n  ${GREEN}✔ 校验通过：原配置核心凭据完整可用，可在清理后直接继承，客户端免修改连接！${PLAIN}"
-        else
-            echo -e "\n  ${YELLOW}⚠️ 提示：检测到部分凭据，新安装时缺失项将自动补充生成。${PLAIN}"
-        fi
-        echo ""
-    else
-        echo -e "  ${YELLOW}未在现有旧配置中解析到结构化代理凭据。${PLAIN}\n"
-    fi
-}
-
-# --- 4. 询问用户是否保留并导出旧凭据 ---
-prompt_preserve_credentials() {
-    if [[ ! -f "${EXTRACTED_INFO_FILE}" ]]; then
-        return 0
-    fi
-    local has_creds
-    has_creds=$(jq -r '.credentials | length' "${EXTRACTED_INFO_FILE}" 2>/dev/null || echo "0")
-    [[ "${has_creds}" -eq 0 ]] && return 0
-
-    title "智能凭据继承与保留保护"
-    echo -e "${YELLOW}系统检测到旧配置中存在有效的节点凭据（域名、UUID、端口、密钥等）。${PLAIN}"
-    echo -e "${GREEN}💡 推荐保留：将其单独导出为标准档案 (${SB_STANDARD_DIR}/node_info.json)，稍后全新部署时可直接继承使用，手机/电脑客户端无需重新配置！${PLAIN}\n"
-
-    read -r -p "是否保留并导出以上凭据供新安装使用？[Y/n]: " keep_choice < /dev/tty
-    if [[ "${keep_choice}" != "n" && "${keep_choice}" != "N" ]]; then
-        mkdir -p "${SB_STANDARD_DIR}"
-        jq '.credentials' "${EXTRACTED_INFO_FILE}" > "${SB_STANDARD_DIR}/node_info.json" 2>/dev/null || true
-        
-        local cert_pem cert_key
-        cert_pem=$(jq -r '.credentials.cert_pem // empty' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
-        cert_key=$(jq -r '.credentials.cert_key // empty' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
-        if [[ -n "${cert_pem}" && -f "${cert_pem}" && -n "${cert_key}" && -f "${cert_key}" ]]; then
-            cp -f "${cert_pem}" "${SB_STANDARD_DIR}/cert.pem" 2>/dev/null || true
-            cp -f "${cert_key}" "${SB_STANDARD_DIR}/cert.key" 2>/dev/null || true
-            info "已同步继承原有 TLS 证书至 ${SB_STANDARD_DIR}/cert.pem"
-        fi
-
-        success "凭证已成功保存至标准位置: ${YELLOW}${SB_STANDARD_DIR}/node_info.json${PLAIN}"
-        tip "在后续运行安装脚本时，将自动使用这些参数无缝升级！"
-    else
-        info "已选择跳过保留旧凭据。"
-    fi
-}
-
-# --- 5. 展示综合扫描诊断报告 ---
+# --- 3. 展示综合扫描诊断报告 ---
 show_scan_report() {
     title "VPS 环境服务扫描与分类诊断报告"
 
@@ -569,13 +203,16 @@ show_scan_report() {
     fi
     echo ""
 
-    echo -e "${CYAN}⚡  Sing-box 核心与管理状态:${PLAIN}"
+    echo -e "${CYAN}⚡  Sing-box 状态与环境:${PLAIN}"
     if [[ ${#FOUND_SB_SERVICES[@]} -gt 0 || -f "${SB_STANDARD_BIN}" || -d "${SB_STANDARD_DIR}" ]]; then
         for item in "${FOUND_SB_SERVICES[@]}"; do
             echo -e "   ✔  ${CYAN}${item}${PLAIN}"
         done
-        [[ -f "${SB_STANDARD_BIN}" ]] && echo -e "   ✔  标准主程序: ${SB_STANDARD_BIN}"
-        [[ -d "${SB_STANDARD_DIR}" ]] && echo -e "   ✔  标准配置目录: ${SB_STANDARD_DIR}"
+        for ex in "${FOUND_SB_EXECS[@]}"; do
+            echo -e "   ✔  服务命令: ${ex}"
+        done
+        [[ -f "${SB_STANDARD_BIN}" ]] && echo -e "   ✔  主程序: ${SB_STANDARD_BIN}"
+        [[ -d "${SB_STANDARD_DIR}" ]] && echo -e "   ✔  配置目录: ${SB_STANDARD_DIR}"
     else
         echo -e "   （未检测到 Sing-box 标准运行环境）"
     fi
@@ -602,328 +239,353 @@ show_scan_report() {
 
     if [[ ${#FOUND_LEGACY_DIRS[@]} -gt 0 ]]; then
         legacy_found=1
-        echo -e "   【遗留配置与日志目录】"
+        echo -e "   【遗留配置与数据目录】"
         for item in "${FOUND_LEGACY_DIRS[@]}"; do
             echo -e "   ❌  ${YELLOW}${item}${PLAIN}"
         done
     fi
 
     if [[ ${legacy_found} -eq 0 ]]; then
-        echo -e "   ${GREEN}✨ 未发现常见的第三方旧代理残留！${PLAIN}"
+        echo -e "   ${GREEN}✔ 未检测到已知的第三方旧代理残留，系统环境极度纯净！${PLAIN}"
     fi
     echo ""
 }
 
-create_backup() {
-    local backup_tar="/root/vps_cleanup_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
-    local items_to_backup=()
+# --- 4. 核心功能：Sing-box 一键完整备份 ---
+backup_singbox() {
+    title "执行 Sing-box 一键完整备份"
+    mkdir -p "${BACKUP_DIR}"
 
-    [[ -d "${SB_STANDARD_DIR}" ]] && items_to_backup+=("${SB_STANDARD_DIR}")
-    for d in "${FOUND_LEGACY_DIRS[@]}"; do
-        [[ -d "${d}" ]] && items_to_backup+=("${d}")
-    done
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_file="${BACKUP_DIR}/sing-box-backup-${timestamp}.tar.gz"
 
-    if [[ ${#items_to_backup[@]} -gt 0 ]]; then
-        info "正在为涉及的配置创建归档备份..."
-        tar -czf "${backup_tar}" "${items_to_backup[@]}" 2>/dev/null || true
-        success "备份已保存至: ${YELLOW}${backup_tar}${PLAIN}"
+    local backup_items=()
+    [[ -d "${SB_STANDARD_DIR}" ]] && backup_items+=("${SB_STANDARD_DIR}")
+    [[ -f "${SB_STANDARD_BIN}" ]] && backup_items+=("${SB_STANDARD_BIN}")
+    [[ -f "${SB_STANDARD_SERVICE}" ]] && backup_items+=("${SB_STANDARD_SERVICE}")
+
+    # 同时备份历史证书目录 (如存在)
+    if [[ -d "/etc/v2ray-agent/tls" ]]; then
+        backup_items+=("/etc/v2ray-agent/tls")
     fi
-}
+    if [[ -d "/root/cert" ]]; then
+        backup_items+=("/root/cert")
+    fi
 
-clean_legacy_proxies() {
-    title "清理第三方旧代理与遗留组件"
-
-    prompt_preserve_credentials
-
-    if [[ ${#FOUND_LEGACY_SERVICES[@]} -eq 0 && ${#FOUND_LEGACY_BINS[@]} -eq 0 && ${#FOUND_LEGACY_DIRS[@]} -eq 0 ]]; then
-        info "系统中未发现第三方旧代理残留，无需清理。"
+    if [[ ${#backup_items[@]} -eq 0 ]]; then
+        warn "未检测到 Sing-box 相关的配置文件或二进制，无需创建备份。"
         return 0
     fi
 
-    echo -e "即将清理以下第三方旧代理组件:"
-    for s in "${FOUND_LEGACY_SERVICES[@]}"; do
-        echo -e "  - 停止并禁用服务: ${RED}${s%% *}${PLAIN}"
-    done
-    for b in "${FOUND_LEGACY_BINS[@]}"; do
-        echo -e "  - 删除执行文件  : ${RED}${b}${PLAIN}"
-    done
-    for d in "${FOUND_LEGACY_DIRS[@]}"; do
-        echo -e "  - 删除配置目录  : ${RED}${d}${PLAIN}"
+    info "正在打包以下文件至备份档案:"
+    for bi in "${backup_items[@]}"; do
+        echo -e "  - ${bi}"
     done
 
+    tar -czf "${backup_file}" "${backup_items[@]}" 2>/dev/null || {
+        error "创建备份失败！请检查磁盘空间与权限。"
+        return 1
+    }
+
+    local b_size
+    b_size=$(du -h "${backup_file}" | awk '{print $1}')
+    success "🎉 Sing-box 完整备份创建成功！"
+    echo -e "  - 备份档案路径: ${GREEN}${backup_file}${PLAIN}"
+    echo -e "  - 档案大小: ${CYAN}${b_size}${PLAIN}"
+    echo -e "  - 备份包含: 配置目录(/etc/sing-box), 客户端文件, 证书密钥, 主程序, Systemd 服务"
+    tip "您可以在任何时候使用本脚本的【一键恢复】功能将节点完全还原！"
     echo ""
-    read -r -p "是否确认清理上述第三方旧代理组件？[y/N]: " confirm < /dev/tty
-    if [[ "${confirm}" != "y" && "${confirm}" != "Y" ]]; then
-        warn "已取消清理第三方旧代理。"
-        return 0
-    fi
-
-    create_backup
-
-    for s in "${FOUND_LEGACY_SERVICES[@]}"; do
-        local svc="${s%% *}"
-        info "正在停止并清理服务: ${svc}..."
-        systemctl stop "${svc}" >/dev/null 2>&1 || true
-        systemctl disable "${svc}" >/dev/null 2>&1 || true
-        rm -f "/etc/systemd/system/${svc}" "/lib/systemd/system/${svc}" "/usr/lib/systemd/system/${svc}" >/dev/null 2>&1 || true
-    done
-    systemctl daemon-reload >/dev/null 2>&1 || true
-
-    for b in "${FOUND_LEGACY_BINS[@]}"; do
-        info "正在删除旧程序: ${b}..."
-        rm -f "${b}" 2>/dev/null || true
-    done
-
-    for d in "${FOUND_LEGACY_DIRS[@]}"; do
-        info "正在删除旧目录: ${d}..."
-        rm -rf "${d}" 2>/dev/null || true
-    done
-
-    success "第三方旧代理与遗留组件清理完毕！"
 }
 
-clean_singbox() {
-    title "重置 / 卸载 Sing-box 环境"
+# --- 5. 核心功能：Sing-box 一键恢复备份 ---
+restore_singbox() {
+    title "Sing-box 一键恢复历史备份"
 
-    prompt_preserve_credentials
+    local backup_files=()
+    while IFS= read -r f; do
+        [[ -n "${f}" ]] && backup_files+=("${f}")
+    done < <(find "${BACKUP_DIR}" /root /var/backups -maxdepth 2 -type f \( -name "*sing-box*.tar.gz" -o -name "*vps_proxy_backup*.tar.gz" -o -name "pre-clean-backup*.tar.gz" \) 2>/dev/null | sort -r || true)
 
-    echo -e "${YELLOW}请选择 Sing-box 清理模式:${PLAIN}"
-    echo -e "  ${GREEN}1.${PLAIN} 仅重置节点与配置（保留自签 10 年证书和节点档案，方便重新部署）"
-    echo -e "  ${GREEN}2.${PLAIN} 完全卸载 Sing-box（删除二进制、所有配置文件、证书及快捷命令）"
-    echo -e "  ${GREEN}0.${PLAIN} 取消返回"
-    echo ""
-
-    read -r -p "请输入选项 [0-2]: " sb_choice < /dev/tty
-    case "${sb_choice}" in
-        1)
-            read -r -p "确认清空 Sing-box 节点配置并重置？[y/N]: " cf < /dev/tty
-            if [[ "${cf}" == "y" || "${cf}" == "Y" ]]; then
-                create_backup
-                systemctl stop sing-box >/dev/null 2>&1 || true
-                rm -f "${SB_STANDARD_DIR}/config.json"
-                rm -rf "${SB_STANDARD_DIR}/client" "${SB_STANDARD_DIR}/client_config.json"
-                success "Sing-box 节点配置已清空，保留了证书与节点档案。"
-            fi
-            ;;
-        2)
-            read -r -p "确认完全卸载 Sing-box？[y/N]: " cf < /dev/tty
-            if [[ "${cf}" == "y" || "${cf}" == "Y" ]]; then
-                create_backup
-                systemctl stop sing-box >/dev/null 2>&1 || true
-                systemctl disable sing-box >/dev/null 2>&1 || true
-                rm -f "${SB_STANDARD_SERVICE}"
-                systemctl daemon-reload
-                rm -f "${SB_STANDARD_BIN}"
-                rm -rf "${SB_STANDARD_DIR}"
-                rm -f "/usr/bin/vps" "/usr/local/bin/vps" "/usr/bin/sb" "/usr/local/bin/sb"
-                success "Sing-box 已完全从系统中卸载干净！"
-            fi
-            ;;
-        0|*)
-            info "已取消。"
-            ;;
-    esac
-}
-
-# --- 9. 全量深度除旧 (含旧凭据检查、继承选择与客户端 0 改动无缝衔接) ---
-clean_all_deep() {
-    title "全量深度除旧（清理所有旧代理残留 + 重置为标准 Sing-box 准备）"
-    echo -e "${RED}⚠️  注意：此操作将清理所有第三方旧代理（Xray/V2Ray/v2ray-agent/Trojan等）以及 Sing-box 旧服务！${PLAIN}"
-    echo -e "${GREEN}🛡️  受保护服务（Tailscale、Nginx、Caddy、WordPress、MySQL 等）将得到 100% 绝对保护！${PLAIN}\n"
-
-    # 1. 检查已提取的旧配置凭据是否完整可用
-    local is_usable has_creds
-    is_usable=$(jq -r '.is_usable // false' "${EXTRACTED_INFO_FILE}" 2>/dev/null || echo "false")
-    has_creds=$(jq -r '.credentials | length' "${EXTRACTED_INFO_FILE}" 2>/dev/null || echo "0")
-
-    local keep_credentials="false"
-
-    if [[ "${has_creds}" -gt 0 ]]; then
-        echo -e "${CYAN}【原配置可复用性检查结果】:${PLAIN}"
-        local u_sum
-        u_sum=$(jq -r '.usable_summary[] | "  ✔ " + .' "${EXTRACTED_INFO_FILE}" 2>/dev/null || true)
-        echo -e "${u_sum}"
-        
-        if [[ "${is_usable}" == "true" ]]; then
-            echo -e "  ${GREEN}👉 检查结论: 原配置核心凭据完整有效！推荐保留，实现客户端 0 改动平滑连接。${PLAIN}\n"
-        else
-            echo -e "  ${YELLOW}👉 检查结论: 捕获了部分参数，在新安装时缺失项将自动补充生成。${PLAIN}\n"
-        fi
-
-        echo -e "${YELLOW}请选择全量清理策略:${PLAIN}"
-        echo -e "  ${GREEN}1.${PLAIN} 保留并继承旧凭据 (推荐): 导出凭据至 ${SB_STANDARD_DIR}/node_info.json，清理后新安装可直接复用，客户端无需任何修改！"
-        echo -e "  ${GREEN}2.${PLAIN} 彻底清空（不保留任何旧凭据）: 清除所有旧环境与凭据，下次安装时生成全新随机端口与密钥。"
-        echo -e "  ${GREEN}0.${PLAIN} 取消退出"
+    if [[ ${#backup_files[@]} -eq 0 ]]; then
+        warn "未在 ${BACKUP_DIR} 或 /root 下检测到任何历史备份文件 (.tar.gz)！"
         echo ""
-
-        read -r -p "请输入策略选项 [1/2/0]: " clean_policy < /dev/tty
-        case "${clean_policy}" in
-            1)
-                keep_credentials="true"
-                info "已选择保留旧凭据，执行平滑迁移全量清理..."
-                ;;
-            2)
-                keep_credentials="false"
-                info "已选择彻底清空所有配置..."
-                ;;
-            0|*)
-                warn "已取消全量深度清理。"
-                return 0
-                ;;
-        esac
-    else
-        read -r -p "是否确认执行全量深度清理？[y/N]: " confirm < /dev/tty
-        if [[ "${confirm}" != "y" && "${confirm}" != "Y" ]]; then
-            warn "已取消全量深度清理。"
+        read -r -p "请输入自定义备份档案的完整绝对路径 (直接回车取消): " custom_path < /dev/tty
+        if [[ -n "${custom_path}" && -f "${custom_path}" ]]; then
+            backup_files=("${custom_path}")
+        else
+            warn "操作已取消。"
             return 0
         fi
     fi
 
-    create_backup
+    echo -e "${CYAN}检测到以下历史备份档案，请选择要恢复的版本:${PLAIN}\n"
+    local idx=1
+    for bf in "${backup_files[@]}"; do
+        local f_size f_date
+        f_size=$(du -h "${bf}" 2>/dev/null | awk '{print $1}')
+        f_date=$(date -r "${bf}" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "未知时间")
+        echo -e "  ${GREEN}[${idx}]${PLAIN} ${bf}  (${CYAN}大小: ${f_size}${PLAIN}, 时间: ${f_date})"
+        ((idx++))
+    done
+    echo -e "  ${GREEN}[c]${PLAIN} 手动输入其他备份文件路径"
+    echo -e "  ${GREEN}[0]${PLAIN} 取消返回\n"
 
-    # 如果选择保留旧凭据，先行导出到标准档案
-    if [[ "${keep_credentials}" == "true" ]]; then
-        mkdir -p "${SB_STANDARD_DIR}"
-        jq '.credentials' "${EXTRACTED_INFO_FILE}" > "${SB_STANDARD_DIR}/node_info.json" 2>/dev/null || true
-        
-        local cert_pem cert_key
-        cert_pem=$(jq -r '.credentials.cert_pem // empty' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
-        cert_key=$(jq -r '.credentials.cert_key // empty' "${EXTRACTED_INFO_FILE}" 2>/dev/null)
-        if [[ -n "${cert_pem}" && -f "${cert_pem}" && -n "${cert_key}" && -f "${cert_key}" ]]; then
-            cp -f "${cert_pem}" "${SB_STANDARD_DIR}/cert.pem" 2>/dev/null || true
-            cp -f "${cert_key}" "${SB_STANDARD_DIR}/cert.key" 2>/dev/null || true
+    read -r -p "请输入选项编号: " sel < /dev/tty
+    local selected_file=""
+
+    if [[ "${sel}" == "0" ]]; then
+        warn "已取消恢复。"
+        return 0
+    elif [[ "${sel}" == "c" || "${sel}" == "C" ]]; then
+        read -r -p "请输入备份文件绝对路径: " custom_path < /dev/tty
+        if [[ -f "${custom_path}" ]]; then
+            selected_file="${custom_path}"
+        else
+            error "文件不存在: ${custom_path}"
+            return 1
         fi
+    elif [[ "${sel}" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#backup_files[@]} )); then
+        selected_file="${backup_files[$((sel-1))]}"
+    else
+        warn "无效选项！"
+        return 1
     fi
 
-    # 1. 清理第三方旧代理
+    echo ""
+    info "已选中备份档案: ${YELLOW}${selected_file}${PLAIN}"
+    read -r -p "恢复操作将覆盖现有 Sing-box 配置并重启服务，是否确认恢复？[Y/n]: " confirm_restore < /dev/tty
+    if [[ "${confirm_restore}" == "n" || "${confirm_restore}" == "N" ]]; then
+        warn "已取消恢复。"
+        return 0
+    fi
+
+    # 1. 停止当前服务
+    info "正在停止当前 Sing-box 服务..."
+    systemctl stop sing-box >/dev/null 2>&1 || true
+
+    # 2. 解压还原备份
+    info "正在解压并还原文件至根目录..."
+    tar -xzf "${selected_file}" -C / 2>/dev/null || {
+        error "解压备份失败，请检查文件是否损坏！"
+        return 1
+    }
+
+    # 3. 修复文件权限与服务
+    [[ -f "${SB_STANDARD_BIN}" ]] && chmod +x "${SB_STANDARD_BIN}"
+    [[ -f "${SB_STANDARD_DIR}/manage.sh" ]] && chmod +x "${SB_STANDARD_DIR}/manage.sh"
+    [[ -f "${SB_STANDARD_DIR}/cert.key" ]] && chmod 600 "${SB_STANDARD_DIR}/cert.key"
+
+    # 设置快捷方式
+    if [[ -f "${SB_STANDARD_DIR}/manage.sh" ]]; then
+        ln -sf "${SB_STANDARD_DIR}/manage.sh" "/usr/bin/vps"
+        ln -sf "${SB_STANDARD_DIR}/manage.sh" "/usr/local/bin/vps"
+        ln -sf "${SB_STANDARD_DIR}/manage.sh" "/usr/bin/sb"
+        ln -sf "${SB_STANDARD_DIR}/manage.sh" "/usr/local/bin/sb"
+    fi
+
+    systemctl daemon-reload
+    systemctl enable sing-box >/dev/null 2>&1 || true
+    systemctl restart sing-box >/dev/null 2>&1 || true
+
+    sleep 1
+
+    if systemctl is-active --quiet sing-box; then
+        success "🎉 恭喜！Sing-box 已从备份成功完整恢复并恢复运行！"
+        if [[ -f "${SB_STANDARD_DIR}/manage.sh" ]]; then
+            echo ""
+            bash "${SB_STANDARD_DIR}/manage.sh" show 2>/dev/null || true
+        fi
+    else
+        warn "Sing-box 文件已解压恢复，但服务启动未通过。请执行: journalctl -u sing-box -e 查看日志。"
+    fi
+}
+
+# --- 6. 清理第三方旧代理 ---
+clean_legacy_proxies() {
+    title "清理第三方旧代理残留 (Xray / V2Ray / Trojan / v2ray-agent 等)"
+    echo -e "${YELLOW}此操作将仅清理第三方旧代理的守护进程、程序文件与配置目录。${PLAIN}"
+    echo -e "${GREEN}受保护服务（Tailscale、Nginx、Caddy、WordPress、MySQL 等）将得到 100% 绝对保护！${PLAIN}\n"
+
+    read -r -p "是否确认清理第三方旧代理？[y/N]: " confirm < /dev/tty
+    if [[ "${confirm}" != "y" && "${confirm}" != "Y" ]]; then
+        warn "已取消清理。"
+        return 0
+    fi
+
+    # 清理前自动执行全局备份
+    backup_singbox
+
+    info "正在停止并禁用第三方旧代理服务..."
     for s in "${FOUND_LEGACY_SERVICES[@]}"; do
         local svc="${s%% *}"
-        info "正在停止并清理服务: ${svc}..."
         systemctl stop "${svc}" >/dev/null 2>&1 || true
         systemctl disable "${svc}" >/dev/null 2>&1 || true
-        rm -f "/etc/systemd/system/${svc}" "/lib/systemd/system/${svc}" "/usr/lib/systemd/system/${svc}" >/dev/null 2>&1 || true
+        rm -f "/etc/systemd/system/${svc}" "/lib/systemd/system/${svc}"
     done
+    systemctl daemon-reload
+
+    info "正在清理第三方旧二进制程序..."
     for b in "${FOUND_LEGACY_BINS[@]}"; do
         rm -f "${b}" 2>/dev/null || true
     done
+
+    info "正在清理第三方配置目录..."
     for d in "${FOUND_LEGACY_DIRS[@]}"; do
         rm -rf "${d}" 2>/dev/null || true
     done
 
-    # 2. 清理旧 Sing-box 服务单元与非标准程序
+    success "第三方旧代理残留清理完毕！"
+}
+
+# --- 7. 清理 Sing-box ---
+clean_singbox() {
+    title "管理与清理 Sing-box 服务"
+    echo -e "${YELLOW}请选择 Sing-box 清理方式:${PLAIN}"
+    echo -e "  ${GREEN}1.${PLAIN} 仅重置配置（保留主程序，重置 /etc/sing-box）"
+    echo -e "  ${GREEN}2.${PLAIN} 彻底完全卸载 Sing-box（删除程序、配置与 Systemd 服务）"
+    echo -e "  ${GREEN}0.${PLAIN} 取消返回"
+    echo ""
+
+    read -r -p "请输入选项 [1/2/0]: " sb_choice < /dev/tty
+    case "${sb_choice}" in
+        1)
+            backup_singbox
+            systemctl stop sing-box >/dev/null 2>&1 || true
+            rm -rf "${SB_STANDARD_DIR}"
+            mkdir -p "${SB_STANDARD_DIR}"
+            success "Sing-box 配置目录已重置完毕。"
+            ;;
+        2)
+            backup_singbox
+            systemctl stop sing-box >/dev/null 2>&1 || true
+            systemctl disable sing-box >/dev/null 2>&1 || true
+            rm -f "${SB_STANDARD_SERVICE}"
+            systemctl daemon-reload
+            rm -f "${SB_STANDARD_BIN}"
+            rm -rf "${SB_STANDARD_DIR}"
+            rm -f "/usr/bin/vps" "/usr/local/bin/vps" "/usr/bin/sb" "/usr/local/bin/sb"
+            success "Sing-box 服务已彻底从系统中卸载完毕。"
+            ;;
+        *)
+            warn "操作已取消。"
+            return 0
+            ;;
+    esac
+}
+
+# --- 8. 全量深度除旧 (清理所有旧代理 + 清除 Sing-box，为全新安装做准备) ---
+clean_all_deep() {
+    title "全量深度除旧（清理所有旧代理残留 + 重置环境为全新安装准备）"
+    echo -e "${RED}⚠️  注意：此操作将清理所有第三方旧代理（Xray/V2Ray/v2ray-agent/Trojan等）以及 Sing-box 旧服务！${PLAIN}"
+    echo -e "${GREEN}🛡️  受保护服务（Tailscale、Nginx、Caddy、WordPress、MySQL 等）将得到 100% 绝对保护！${PLAIN}\n"
+
+    read -r -p "是否确认执行全量深度清理？[y/N]: " confirm < /dev/tty
+    if [[ "${confirm}" != "y" && "${confirm}" != "Y" ]]; then
+        warn "已取消全量深度清理。"
+        return 0
+    fi
+
+    # 清理前自动创建完整备份
+    backup_singbox
+
+    # 1. 清理第三方旧代理
+    info "正在停止并清理所有第三方旧代理服务..."
+    for s in "${FOUND_LEGACY_SERVICES[@]}"; do
+        local svc="${s%% *}"
+        systemctl stop "${svc}" >/dev/null 2>&1 || true
+        systemctl disable "${svc}" >/dev/null 2>&1 || true
+        rm -f "/etc/systemd/system/${svc}" "/lib/systemd/system/${svc}"
+    done
+    systemctl daemon-reload
+
+    for b in "${FOUND_LEGACY_BINS[@]}"; do
+        rm -f "${b}" 2>/dev/null || true
+    done
+
+    for d in "${FOUND_LEGACY_DIRS[@]}"; do
+        rm -rf "${d}" 2>/dev/null || true
+    done
+
+    # 2. 清理旧 Sing-box 服务单元与程序
+    info "正在清理 Sing-box 旧环境..."
     systemctl stop sing-box >/dev/null 2>&1 || true
     systemctl disable sing-box >/dev/null 2>&1 || true
     rm -f "${SB_STANDARD_SERVICE}"
     systemctl daemon-reload
     rm -f "${SB_STANDARD_BIN}"
-    
-    if [[ "${keep_credentials}" == "true" ]]; then
-        # 保留 node_info.json 和 cert.*
-        if [[ -d "${SB_STANDARD_DIR}" ]]; then
-            find "${SB_STANDARD_DIR}" -mindepth 1 ! -name 'node_info.json' ! -name 'cert.pem' ! -name 'cert.key' -exec rm -rf {} + 2>/dev/null || true
-        fi
-    else
-        rm -rf "${SB_STANDARD_DIR}"
-    fi
-
+    rm -rf "${SB_STANDARD_DIR}"
     rm -f "/usr/bin/vps" "/usr/local/bin/vps" "/usr/bin/sb" "/usr/local/bin/sb"
 
     success "🎉 全量深度除旧完成！VPS 当前代理环境已完全纯净化。"
-    
-    if [[ "${keep_credentials}" == "true" ]]; then
-        echo -e "\n${GREEN}💡 节点凭据已妥善保存至 ${SB_STANDARD_DIR}/node_info.json${PLAIN}"
-        read -r -p "是否立即启动新版一键安装脚本（自动继承旧配置，客户端 0 改动）？[Y/n]: " run_install < /dev/tty
-        if [[ "${run_install}" != "n" && "${run_install}" != "N" ]]; then
-            bash <(curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/install.sh?v=$(date +%s)")
-        fi
-    else
-        read -r -p "是否立即启动全新一键安装脚本（全新配置）？[y/N]: " run_install < /dev/tty
-        if [[ "${run_install}" == "y" || "${run_install}" == "Y" ]]; then
-            bash <(curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/install.sh?v=$(date +%s)")
-        fi
+    echo ""
+    read -r -p "是否立即启动新版一键安装脚本部署全新的 4合1 服务？[Y/n]: " run_install < /dev/tty
+    if [[ "${run_install}" != "n" && "${run_install}" != "N" ]]; then
+        bash <(curl -fsSL "https://raw.githubusercontent.com/luckyjamesriver/VPS-Sing-box/main/install.sh?v=$(date +%s)")
     fi
 }
 
 # --- 交互主菜单 ---
 clean_menu() {
-    check_root
-    scan_system
-
+    clear
     echo -e "${PURPLE}====================================================${PLAIN}"
-    echo -e "${CYAN}        VPS-Sing-box 智能环境除旧与清理工具         ${PLAIN}"
+    echo -e "${GREEN}       VPS 环境安全除旧、完整备份与恢复工具          ${PLAIN}"
     echo -e "${BLUE}    GitHub: https://github.com/luckyjamesriver/VPS-Sing-box${PLAIN}"
     echo -e "${PURPLE}====================================================${PLAIN}"
 
+    scan_system
     show_scan_report
-    show_extracted_credentials
     show_network_ports
 
-    echo -e "${PURPLE}====================================================${PLAIN}"
-    echo -e "${YELLOW}请选择除旧清理操作:${PLAIN}"
     echo -e "----------------------------------------------------"
-    echo -e "${GREEN}1.${PLAIN} 仅清理【第三方旧代理残留】(Xray/V2Ray/v2ray-agent/Trojan等, 可保留凭据)"
-    echo -e "${GREEN}2.${PLAIN} 管理与清理【Sing-box 配置 / 卸载】"
-    echo -e "${GREEN}3.${PLAIN} 【全量深度除旧】(清理所有旧代理 + 智能继承/全新重置 Sing-box)"
-    echo -e "${GREEN}4.${PLAIN} 单独导出/保存当前节点凭据档案 (/etc/sing-box/node_info.json)"
-    echo -e "${GREEN}5.${PLAIN} 重新刷新扫描系统服务与端口"
-    echo -e "${GREEN}0.${PLAIN} 退出清理脚本"
+    echo -e "${GREEN}1.${PLAIN} 仅清理【第三方旧代理残留】(Xray/V2Ray/v2ray-agent/Trojan等)"
+    echo -e "${GREEN}2.${PLAIN} 管理与清理【Sing-box 服务 / 卸载】"
+    echo -e "${GREEN}3.${PLAIN} 【全量深度除旧】(清理所有旧代理 + 重置环境，为全新安装准备)"
+    echo -e "${GREEN}4.${PLAIN} 📦 【一键完整备份】当前 Sing-box (配置+证书+密钥+程序)"
+    echo -e "${GREEN}5.${PLAIN} 🔄 【一键恢复备份】从历史备份还原 Sing-box"
+    echo -e "${GREEN}6.${PLAIN} 重新刷新扫描系统服务与端口"
+    echo -e "${GREEN}0.${PLAIN} 退出工具"
     echo -e "----------------------------------------------------"
 
-    read -r -p "请输入选项 [0-5]: " menu_choice < /dev/tty
+    read -r -p "请输入选项 [0-6]: " menu_choice < /dev/tty
     case "${menu_choice}" in
-        1)
-            clean_legacy_proxies
-            ;;
-        2)
-            clean_singbox
-            ;;
-        3)
-            clean_all_deep
-            ;;
-        4)
-            prompt_preserve_credentials
-            ;;
-        5)
-            info "正在重新扫描..."
-            sleep 1
-            clean_menu
-            ;;
-        0)
-            info "退出清理工具。"
-            exit 0
-            ;;
-        *)
-            warn "无效选项，请重新输入！"
-            sleep 1
-            clean_menu
-            ;;
+        1) clean_legacy_proxies ;;
+        2) clean_singbox ;;
+        3) clean_all_deep ;;
+        4) backup_singbox ;;
+        5) restore_singbox ;;
+        6) clean_menu ;;
+        0) exit 0 ;;
+        *) warn "无效选项，请重新输入！"; sleep 1; clean_menu ;;
     esac
 }
 
-# --- CLI 调用入口 ---
+# --- 入口处理 ---
+check_root
+
 if [[ $# -gt 0 ]]; then
-    check_root
-    scan_system
     case "$1" in
-        scan|report|status)
+        backup)
+            backup_singbox
+            ;;
+        restore)
+            restore_singbox
+            ;;
+        scan)
+            scan_system
             show_scan_report
-            show_extracted_credentials
             show_network_ports
             ;;
-        legacy|old)
+        clean-legacy)
+            scan_system
             clean_legacy_proxies
             ;;
-        sb|singbox)
-            clean_singbox
-            ;;
-        all|deep)
+        clean-all)
+            scan_system
             clean_all_deep
             ;;
-        extract|save)
-            prompt_preserve_credentials
-            ;;
         *)
-            echo "用法: $0 [scan|legacy|singbox|all|extract]"
+            echo "用法: $0 {backup|restore|scan|clean-legacy|clean-all}"
             exit 1
             ;;
     esac
