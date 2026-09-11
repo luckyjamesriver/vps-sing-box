@@ -390,8 +390,6 @@ for c_path in sorted(list(candidate_files)):
     with open("/tmp/extracted_proxy_info.json", "w") as f:
         json.dump(extracted, f, indent=2)
 
-    return extracted
-
 PYEOF
 }
 
