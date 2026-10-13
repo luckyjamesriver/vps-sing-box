@@ -973,6 +973,16 @@ update_script() {
             ln -sf "${SCRIPT_PATH}" "/usr/local/bin/sb"
             ln -sf "${SCRIPT_PATH}" "/usr/local/bin/update-sing-box"
             info "管理脚本已成功更新至最新版本！"
+
+            # 如果检测到本地已安装，询问是否同步平滑更新本地配置
+            if [[ -f "${INFO_FILE}" || -f "${CONFIG_FILE}" ]]; then
+                echo ""
+                read -r -p "是否立即平滑更新本地 config.json (应用最新架构模板并保留全部密钥与端口)？[Y/n]: " update_cfg_choice < /dev/tty
+                if [[ "${update_cfg_choice}" != "n" && "${update_cfg_choice}" != "N" ]]; then
+                    exec "${SCRIPT_PATH}" update-config
+                fi
+            fi
+
             sleep 1
             exec "${SCRIPT_PATH}"
         else
@@ -997,6 +1007,48 @@ update_core() {
     systemctl restart sing-box
     info "Sing-box 核心更新完毕并已重启服务。"
     "${BIN_PATH}" version 2>/dev/null | head -n 1
+}
+
+# --- Smoothly Refresh / Update Config to Latest Template ---
+update_config() {
+    check_root
+    check_system
+    title "平滑更新本地 Sing-box 节点配置"
+
+    if [[ ! -f "${INFO_FILE}" && ! -f "${CONFIG_FILE}" ]]; then
+        error "未检测到现有配置，请先执行安装！"
+        return 1
+    fi
+
+    local user_domain=""
+    local public_ip=""
+    local server_up_mbps="500"
+    local server_down_mbps="50"
+
+    public_ip=$(get_public_ip)
+
+    if [[ -f "${INFO_FILE}" ]]; then
+        user_domain=$(jq -r '.domain // empty' "${INFO_FILE}" 2>/dev/null)
+        server_up_mbps=$(jq -r '.server_up_mbps // 500' "${INFO_FILE}" 2>/dev/null)
+        server_down_mbps=$(jq -r '.server_down_mbps // 50' "${INFO_FILE}" 2>/dev/null)
+    fi
+
+    if [[ -z "${user_domain}" && -f "${CONFIG_FILE}" ]]; then
+        user_domain=$(jq -r '.inbounds[] | select(.type=="hysteria2" or .type=="tuic") | .tls.server_name // empty' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+    fi
+
+    if [[ -z "${user_domain}" ]]; then
+        warn "未能自动获取已绑定域名，请通过主菜单 [1. 安装 / 重新配置] 手动确认。"
+        return 1
+    fi
+
+    info "正在使用最新架构模板更新配置 (保留现有端口、UUID 与凭据)..."
+    generate_configs "${user_domain}" "${public_ip}" "${server_up_mbps}" "${server_down_mbps}" "true"
+    start_service
+    setup_shortcut
+
+    info "本地服务端与客户端配置文件已成功平滑更新至最新架构模板！"
+    show_nodes
 }
 
 # --- Call Clean.sh ---
@@ -1257,6 +1309,9 @@ if [[ $# -gt 0 ]]; then
             shift
             update_core "$@"
             ;;
+        update-config|reconfig)
+            update_config
+            ;;
         upgrade|update-script)
             update_script
             ;;
@@ -1267,7 +1322,7 @@ if [[ $# -gt 0 ]]; then
             uninstall_flow
             ;;
         *)
-            echo "用法: $0 {install|show|client|backup|restore|restart|stop|status|logs|update|update-script|clean|uninstall}"
+            echo "用法: $0 {install|show|client|backup|restore|restart|stop|status|logs|update|update-config|update-script|clean|uninstall}"
             exit 1
             ;;
     esac
