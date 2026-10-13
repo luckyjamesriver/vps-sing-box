@@ -139,11 +139,16 @@ get_random_port() {
 
 # --- Install / Upgrade Sing-box Binary ---
 install_singbox_core() {
-    title "下载并安装 Sing-box 核心"
+    local force_flag="$1"
     mkdir -p "${CONFIG_DIR}"
 
+    local current_version=""
+    if [[ -x "${BIN_PATH}" ]]; then
+        current_version=$("${BIN_PATH}" version 2>/dev/null | head -n 1 | awk '{print $3}' | sed 's/^v//')
+    fi
+
+    info "正在检查 Sing-box 核心最新版本..."
     local latest_tag=""
-    info "正在获取 Sing-box 最新稳定版本..."
     local latest_url
     latest_url=$(curl -sIL -o /dev/null -w '%{url_effective}' --connect-timeout 10 https://github.com/SagerNet/sing-box/releases/latest 2>/dev/null || true)
     latest_tag=$(basename "${latest_url}")
@@ -158,10 +163,31 @@ install_singbox_core() {
     fi
 
     local version_no_v="${latest_tag#v}"
+
+    # 检查本地版本：如果已是最新版本且非强制模式，无需重复下载和更新
+    if [[ "${force_flag}" != "force" && -n "${current_version}" ]]; then
+        if [[ "${current_version}" == "${version_no_v}" ]]; then
+            info "当前本地 Sing-box 核心已是最新版本 (${latest_tag})，无需重复下载和更新！"
+            return 100
+        fi
+        local higher_ver
+        higher_ver=$(printf '%s\n%s\n' "${current_version}" "${version_no_v}" | sort -V 2>/dev/null | tail -n 1)
+        if [[ "${higher_ver}" == "${current_version}" ]]; then
+            info "当前本地 Sing-box 核心版本 (v${current_version}) 已不低于远程最新版本 (${latest_tag})，无需下载更新！"
+            return 100
+        fi
+    fi
+
+    title "下载并安装 Sing-box 核心"
+    if [[ -n "${current_version}" ]]; then
+        info "发现新版本: ${latest_tag} (当前本地版本: v${current_version})，准备下载更新 (${PKG_ARCH})..."
+    else
+        info "准备下载安装 Sing-box ${latest_tag} (${PKG_ARCH})..."
+    fi
+
     local tar_name="sing-box-${version_no_v}-linux-${PKG_ARCH}.tar.gz"
     local raw_url="https://github.com/SagerNet/sing-box/releases/download/${latest_tag}/${tar_name}"
 
-    info "下载版本: ${latest_tag} (${PKG_ARCH})..."
     local temp_dir
     temp_dir=$(mktemp -d)
 
@@ -180,12 +206,23 @@ install_singbox_core() {
         exit 1
     fi
 
+    info "正在解压并替换 Sing-box 二进制程序..."
     tar -zxvf "${temp_dir}/${tar_name}" -C "${temp_dir}" >/dev/null
     local new_bin
     new_bin=$(find "${temp_dir}" -type f -name "sing-box" | head -n 1)
+    if [[ -z "${new_bin}" || ! -f "${new_bin}" ]]; then
+        error "解压后的安装包中未找到 sing-box 二进制文件！"
+        rm -rf "${temp_dir}"
+        exit 1
+    fi
+
     cp -f "${new_bin}" "${BIN_PATH}"
     chmod +x "${BIN_PATH}"
+
+    # 更新完成后，删除下载的压缩包与临时目录
+    rm -f "${temp_dir}/${tar_name}"
     rm -rf "${temp_dir}"
+    info "已删除下载的压缩包 (${tar_name}) 并清理安装缓存。"
 
     info "Sing-box 核心安装成功: $(${BIN_PATH} version | head -n 1)"
 
@@ -209,6 +246,7 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     systemctl enable sing-box >/dev/null 2>&1 || true
+    return 0
 }
 
 # --- Generate 10-Year Self-Signed Certificate ---
@@ -815,8 +853,9 @@ setup_shortcut() {
     ln -sf "${SCRIPT_PATH}" "/usr/local/bin/vps"
     ln -sf "${SCRIPT_PATH}" "/usr/bin/sb"
     ln -sf "${SCRIPT_PATH}" "/usr/local/bin/sb"
+    ln -sf "${SCRIPT_PATH}" "/usr/local/bin/update-sing-box"
 
-    info "快捷命令 [vps] 已就绪。"
+    info "快捷命令 [vps] 与 [update-sing-box] 已就绪。"
 }
 
 # --- Interactive Install Entrypoint ---
@@ -932,6 +971,7 @@ update_script() {
             ln -sf "${SCRIPT_PATH}" "/usr/local/bin/vps"
             ln -sf "${SCRIPT_PATH}" "/usr/bin/sb"
             ln -sf "${SCRIPT_PATH}" "/usr/local/bin/sb"
+            ln -sf "${SCRIPT_PATH}" "/usr/local/bin/update-sing-box"
             info "管理脚本已成功更新至最新版本！"
             sleep 1
             exec "${SCRIPT_PATH}"
@@ -949,9 +989,14 @@ update_script() {
 update_core() {
     check_root
     check_system
-    install_singbox_core
+    install_singbox_core "$1"
+    local ret=$?
+    if [[ ${ret} -eq 100 ]]; then
+        return 0
+    fi
     systemctl restart sing-box
     info "Sing-box 核心更新完毕并已重启服务。"
+    "${BIN_PATH}" version 2>/dev/null | head -n 1
 }
 
 # --- Call Clean.sh ---
@@ -1174,6 +1219,11 @@ menu() {
 }
 
 # --- Entry Point ---
+if [[ "$(basename "$0")" == "update-sing-box" ]]; then
+    update_core "$@"
+    exit 0
+fi
+
 if [[ $# -gt 0 ]]; then
     case "$1" in
         install)
@@ -1203,11 +1253,12 @@ if [[ $# -gt 0 ]]; then
         log|logs)
             service_logs
             ;;
+        update|update-core)
+            shift
+            update_core "$@"
+            ;;
         upgrade|update-script)
             update_script
-            ;;
-        update)
-            update_core
             ;;
         clean|purge)
             clean_flow
@@ -1216,7 +1267,7 @@ if [[ $# -gt 0 ]]; then
             uninstall_flow
             ;;
         *)
-            echo "用法: $0 {install|show|client|backup|restore|restart|stop|status|logs|upgrade|update|clean|uninstall}"
+            echo "用法: $0 {install|show|client|backup|restore|restart|stop|status|logs|update|update-script|clean|uninstall}"
             exit 1
             ;;
     esac

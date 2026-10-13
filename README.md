@@ -99,6 +99,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/vps-sing-box
 | `vps restart` | 重启 Sing-box 服务 |
 | `vps stop` | 停止 Sing-box 服务 |
 | `vps log` | 实时追踪查看节点运行日志 |
+| `vps update` / `update-sing-box` | **智能检查并更新 Sing-box 核心**（先比对本地版本，有更新才下载并在更新后自动删除压缩包） |
 | `vps clean` | 调用环境除旧与旧代理扫描清理工具 |
 
 ---
