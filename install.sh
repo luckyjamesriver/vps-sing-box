@@ -390,7 +390,7 @@ generate_configs() {
   "inbounds": [
     {
       "type": "hysteria2",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": ${port_hy2},
       "up_mbps": ${server_up_mbps},
       "down_mbps": ${server_down_mbps},
@@ -417,7 +417,7 @@ generate_configs() {
     {
       "type": "vless",
       "tag": "VLESSReality",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": ${port_reality_tcp},
       "users": [
         {
@@ -446,7 +446,7 @@ generate_configs() {
     {
       "type": "vless",
       "tag": "VLESSRealityGRPC",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": ${port_reality_grpc},
       "users": [
         {
@@ -478,7 +478,7 @@ generate_configs() {
     {
       "type": "tuic",
       "tag": "singbox-tuic-in",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": ${port_tuic},
       "users": [
         {
