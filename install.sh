@@ -92,7 +92,7 @@ install_dependencies() {
     info "基础依赖安装完成。"
 }
 
-# --- Enable Linux BBR and TCP Brutal ---
+# --- Enable Linux BBR ---
 enable_bbr() {
     info "检查并配置原生 Linux BBR 拥塞控制算法..."
     if sysctl net.ipv4.tcp_congestion_control | grep -q bbr; then
@@ -108,18 +108,6 @@ enable_bbr() {
         else
             warn "BBR 激活可能需要重启内核生效，已写入配置文件。"
         fi
-    fi
-
-    # Install TCP Brutal kernel module for VLESS TCP Brutal acceleration
-    info "检查并安装 Linux TCP Brutal 拥塞控制内核模块..."
-    if ! lsmod | grep -q "tcp_brutal"; then
-        info "正在执行 TCP Brutal 官方内核模块安装脚本 (https://tcp.hy2.sh/)..."
-        bash <(curl -fsSL https://tcp.hy2.sh/) || {
-            warn "TCP Brutal 内核模块自动安装未完成，建议使用 Linux 5.8+ 内核。"
-        }
-    fi
-    if lsmod | grep -q "tcp_brutal"; then
-        info "TCP Brutal 内核模块已加载！"
     fi
 }
 
@@ -154,33 +142,48 @@ install_singbox_core() {
     title "下载并安装 Sing-box 核心"
     mkdir -p "${CONFIG_DIR}"
 
-    local latest_tag
+    local latest_tag=""
     info "正在获取 Sing-box 最新稳定版本..."
-    latest_tag=$(curl -sSL "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r ".tag_name" 2>/dev/null || true)
+    local latest_url
+    latest_url=$(curl -sIL -o /dev/null -w '%{url_effective}' --connect-timeout 10 https://github.com/SagerNet/sing-box/releases/latest 2>/dev/null || true)
+    latest_tag=$(basename "${latest_url}")
 
-    if [[ -z "${latest_tag}" || "${latest_tag}" == "null" ]]; then
-        warn "通过 GitHub API 获取版本失败，使用备用兜底稳定版本 v1.11.4"
+    if [[ ! "${latest_tag}" =~ ^v[0-9] ]]; then
+        latest_tag=$(curl -sSL "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r ".tag_name" 2>/dev/null || true)
+    fi
+
+    if [[ ! "${latest_tag}" =~ ^v[0-9] ]]; then
+        warn "通过 GitHub 获取版本失败，使用备用兜底稳定版本 v1.11.4"
         latest_tag="v1.11.4"
     fi
 
     local version_no_v="${latest_tag#v}"
     local tar_name="sing-box-${version_no_v}-linux-${PKG_ARCH}.tar.gz"
-    local download_url="https://github.com/SagerNet/sing-box/releases/download/${latest_tag}/${tar_name}"
+    local raw_url="https://github.com/SagerNet/sing-box/releases/download/${latest_tag}/${tar_name}"
 
     info "下载版本: ${latest_tag} (${PKG_ARCH})..."
     local temp_dir
     temp_dir=$(mktemp -d)
-    if ! wget -q --show-progress -O "${temp_dir}/${tar_name}" "${download_url}"; then
-        warn "直接下载较慢或超时，尝试镜像加速源..."
-        wget -q --show-progress -O "${temp_dir}/${tar_name}" "https://ghproxy.net/${download_url}" || {
-            error "下载 Sing-box 失败，请检查 VPS 网络连接！"
-            rm -rf "${temp_dir}"
-            exit 1
-        }
+
+    local download_success=false
+    if curl -f -L --connect-timeout 15 -o "${temp_dir}/${tar_name}" "https://gh-proxy.com/${raw_url}" 2>/dev/null; then
+        download_success=true
+    elif curl -f -L --connect-timeout 15 -o "${temp_dir}/${tar_name}" "https://ghfast.top/${raw_url}" 2>/dev/null; then
+        download_success=true
+    elif curl -f -L --connect-timeout 15 -o "${temp_dir}/${tar_name}" "${raw_url}" 2>/dev/null; then
+        download_success=true
+    fi
+
+    if [[ "${download_success}" != true || ! -s "${temp_dir}/${tar_name}" ]]; then
+        error "下载 Sing-box 失败，请检查 VPS 网络连接！"
+        rm -rf "${temp_dir}"
+        exit 1
     fi
 
     tar -zxvf "${temp_dir}/${tar_name}" -C "${temp_dir}" >/dev/null
-    cp -f "${temp_dir}/sing-box-${version_no_v}-linux-${PKG_ARCH}/sing-box" "${BIN_PATH}"
+    local new_bin
+    new_bin=$(find "${temp_dir}" -type f -name "sing-box" | head -n 1)
+    cp -f "${new_bin}" "${BIN_PATH}"
     chmod +x "${BIN_PATH}"
     rm -rf "${temp_dir}"
 
@@ -242,8 +245,8 @@ allow_ports() {
 generate_configs() {
     local domain="$1"
     local public_ip="$2"
-    local server_up_mbps="${3:-50}"
-    local server_down_mbps="${4:-500}"
+    local server_up_mbps="${3:-500}"
+    local server_down_mbps="${4:-50}"
     local is_reuse="${5:-false}"
 
     local client_up_mbps="${server_down_mbps}"
@@ -324,7 +327,7 @@ generate_configs() {
     [[ -z "${salamander_pwd}" ]] && salamander_pwd=$(openssl rand -hex 8)
 
     info "应用端口配置:"
-    echo -e "  - VLESS-Reality (TCP Brutal) : ${GREEN}${port_reality_tcp}${PLAIN}"
+    echo -e "  - VLESS-Reality-Vision (TCP) : ${GREEN}${port_reality_tcp}${PLAIN}"
     echo -e "  - VLESS-Reality-gRPC (TCP)   : ${GREEN}${port_reality_grpc}${PLAIN}"
     echo -e "  - Hysteria 2         (UDP)   : ${GREEN}${port_hy2}${PLAIN}"
     echo -e "  - TUIC v5            (UDP)   : ${GREEN}${port_tuic}${PLAIN}"
@@ -338,7 +341,7 @@ generate_configs() {
         generate_cert "${domain}"
     fi
 
-    # 1. Server Configuration (No DNS block, TCP Brutal on VLESS, CN Geosite Rule-set Block)
+    # 1. Server Configuration (No DNS block, VLESS-Reality-Vision native TCP, CN Geosite Rule-set Block)
     cat > "${CONFIG_FILE}" <<EOF
 {
   "log": {
@@ -380,9 +383,9 @@ generate_configs() {
       "listen_port": ${port_reality_tcp},
       "users": [
         {
-          "name": "VLESS_Reality_Brutal",
+          "name": "VLESS_Reality_Vision",
           "uuid": "${uuid}",
-          "flow": ""
+          "flow": "xtls-rprx-vision"
         }
       ],
       "tls": {
@@ -399,15 +402,6 @@ generate_configs() {
             "",
             "${short_id}"
           ]
-        }
-      },
-      "multiplex": {
-        "enabled": true,
-        "padding": false,
-        "brutal": {
-          "enabled": true,
-          "up_mbps": ${server_up_mbps},
-          "down_mbps": ${server_down_mbps}
         }
       }
     },
@@ -510,7 +504,7 @@ generate_configs() {
 }
 EOF
 
-    # 2. Client Complete Configuration (Matched Bandwidth Values, Brutal, Salamander OBFS)
+    # 2. Client Complete Configuration (Matched Bandwidth Values, Hysteria2 UDP Brutal, Salamander OBFS)
     mkdir -p "${CLIENT_DIR}"
     cat > "${CLIENT_FILE}" <<EOF
 {
@@ -544,19 +538,19 @@ EOF
       "type": "selector",
       "tag": "select",
       "outbounds": [
-        "VLESS-Reality-Brutal",
+        "VLESS-Reality-Vision",
         "VLESS-Reality-gRPC",
         "Hysteria2",
         "TUIC-v5",
         "auto"
       ],
-      "default": "VLESS-Reality-Brutal"
+      "default": "VLESS-Reality-Vision"
     },
     {
       "type": "urltest",
       "tag": "auto",
       "outbounds": [
-        "VLESS-Reality-Brutal",
+        "VLESS-Reality-Vision",
         "VLESS-Reality-gRPC",
         "Hysteria2",
         "TUIC-v5"
@@ -567,10 +561,11 @@ EOF
     },
     {
       "type": "vless",
-      "tag": "VLESS-Reality-Brutal",
+      "tag": "VLESS-Reality-Vision",
       "server": "${public_ip}",
       "server_port": ${port_reality_tcp},
       "uuid": "${uuid}",
+      "flow": "xtls-rprx-vision",
       "tls": {
         "enabled": true,
         "server_name": "${reality_sni}",
@@ -584,19 +579,7 @@ EOF
           "short_id": "${short_id}"
         }
       },
-      "packet_encoding": "xudp",
-      "multiplex": {
-        "enabled": true,
-        "protocol": "h2mux",
-        "max_connections": 1,
-        "min_streams": 4,
-        "padding": false,
-        "brutal": {
-          "enabled": true,
-          "up_mbps": ${client_up_mbps},
-          "down_mbps": ${client_down_mbps}
-        }
-      }
+      "packet_encoding": "xudp"
     },
     {
       "type": "vless",
@@ -767,7 +750,7 @@ show_nodes() {
     client_down_mbps=$(jq -r ".client_down_mbps" "${INFO_FILE}")
 
     # Standard Share Links (Using Public IP for direct connection)
-    local uri_reality_tcp="vless://${uuid}@${public_ip}:${port_reality_tcp}?encryption=none&security=reality&sni=${reality_sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp#VLESS-Reality-Brutal"
+    local uri_reality_tcp="vless://${uuid}@${public_ip}:${port_reality_tcp}?encryption=none&security=reality&sni=${reality_sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&flow=xtls-rprx-vision#VLESS-Reality-Vision"
     local uri_reality_grpc="vless://${uuid}@${public_ip}:${port_reality_grpc}?encryption=none&security=reality&sni=${reality_sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=grpc&serviceName=grpc-service#VLESS-Reality-gRPC"
     local uri_hy2="hysteria2://${hy2_password}@${public_ip}:${port_hy2}/?insecure=1&sni=${domain}&obfs=salamander&obfs-password=${salamander_pwd}#Hysteria2"
     local uri_tuic="tuic://${uuid}:${tuic_password}@${public_ip}:${port_tuic}?congestion_control=bbr&alpn=h3&sni=${domain}&allow_insecure=1#TUIC-v5"
@@ -777,7 +760,7 @@ show_nodes() {
     echo -e "${YELLOW}带宽限量设置:${PLAIN} 服务端上行 ${server_up_mbps} Mbps, 下行 ${server_down_mbps} Mbps | 客户端对应上行 ${client_up_mbps} Mbps, 下行 ${client_down_mbps} Mbps"
     echo -e "${YELLOW}客户端配置文件:${PLAIN} ${CLIENT_FILE}\n"
 
-    echo -e "${GREEN}1. VLESS-Reality (TCP Brutal 强力拥塞控制):${PLAIN}"
+    echo -e "${GREEN}1. VLESS-Reality-Vision (TCP 原生零拷贝直通):${PLAIN}"
     echo -e "   ${BLUE}${uri_reality_tcp}${PLAIN}\n"
 
     echo -e "${GREEN}2. VLESS-Reality-gRPC (TCP 多路复用备用):${PLAIN}"
@@ -789,7 +772,7 @@ show_nodes() {
     echo -e "${GREEN}4. TUIC v5 (UDP 0-RTT 极速 QUIC):${PLAIN}"
     echo -e "   ${BLUE}${uri_tuic}${PLAIN}\n"
 
-    title "VLESS-Reality (TCP Brutal) 二维码 (手机扫码即可导入)"
+    title "VLESS-Reality-Vision 二维码 (手机扫码即可导入)"
     qrencode -t ANSIUTF8 "${uri_reality_tcp}" || true
 
     echo -e "\n${YELLOW}提示:${PLAIN} 随时输入快捷管理命令 ${GREEN}vps${PLAIN} 即可唤出管理菜单！"
@@ -849,15 +832,15 @@ install_flow() {
     local is_reuse="false"
     local user_domain=""
     local old_uuid=""
-    local old_up="50"
-    local old_down="500"
+    local old_up="500"
+    local old_down="50"
 
     # 如果存在本机标准安装配置，支持平滑升级/保留
     if [[ -f "${INFO_FILE}" ]]; then
         user_domain=$(jq -r '.domain // empty' "${INFO_FILE}" 2>/dev/null)
         old_uuid=$(jq -r '.uuid // empty' "${INFO_FILE}" 2>/dev/null)
-        old_up=$(jq -r '.server_up_mbps // 50' "${INFO_FILE}" 2>/dev/null)
-        old_down=$(jq -r '.server_down_mbps // 500' "${INFO_FILE}" 2>/dev/null)
+        old_up=$(jq -r '.server_up_mbps // 500' "${INFO_FILE}" 2>/dev/null)
+        old_down=$(jq -r '.server_down_mbps // 50' "${INFO_FILE}" 2>/dev/null)
     elif [[ -f "${CONFIG_FILE}" ]]; then
         old_uuid=$(jq -r '.inbounds[] | select(.type=="vless") | .users[0].uuid // empty' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
         user_domain=$(jq -r '.inbounds[] | select(.type=="hysteria2" or .type=="tuic") | .tls.server_name // empty' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
@@ -898,11 +881,11 @@ install_flow() {
         done
     fi
 
-    title "配置 TCP Brutal 与带宽限速参数"
-    echo -e "提示: 服务端上行对应客户端下行，服务端下行对应客户端上行。"
-    read -r -p "请输入 VPS 上行带宽限制 up_mbps [回车默认 ${old_up}]: " input_up < /dev/tty
+    title "配置 Hysteria 2 动态带宽限速参数"
+    echo -e "提示: 服务端上行对应客户端下行(默认 500 Mbps)，服务端下行对应客户端上行(默认 50 Mbps)。"
+    read -r -p "请输入 VPS 上行带宽限制 up_mbps (客户端下载速度) [回车默认 ${old_up}]: " input_up < /dev/tty
     local server_up_mbps="${input_up:-${old_up}}"
-    read -r -p "请输入 VPS 下行带宽限制 down_mbps [回车默认 ${old_down}]: " input_down < /dev/tty
+    read -r -p "请输入 VPS 下行带宽限制 down_mbps (客户端上传速度) [回车默认 ${old_down}]: " input_down < /dev/tty
     local server_down_mbps="${input_down:-${old_down}}"
     info "设定带宽限制: VPS 上行 ${server_up_mbps} Mbps / 下行 ${server_down_mbps} Mbps"
 

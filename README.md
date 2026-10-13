@@ -15,14 +15,14 @@
 
 **VPS-Sing-box** 剔除了 95% 的历史包袱，以纯粹的 Sing-box 官方核心为基础，提供：
 
-1. **顶级协议 4 合 1 黄金矩阵 (集成 TCP Brutal & Salamander 混淆)**：
-   * **VLESS-Reality (TCP Brutal 暴击加速)**：基于 [chika0801/sing-box-examples](https://github.com/chika0801/sing-box-examples/tree/main/TCP_Brutal) 规范，在 Reality 基础上挂载 Linux 内核级 **TCP Brutal** 多路复用拥塞控制算法，即使在最恶劣丢包线路下也能强制拉满带宽！
+1. **顶级协议 4 合 1 黄金矩阵 (原生 Vision 零拷贝 + Hysteria2 UDP Brutal + Salamander 混淆)**：
+   * **VLESS-Reality-Vision (TCP 原生零拷贝直通)**：对齐 `v2ray-agent` 经典架构标准规范，采用原生 TCP + `xtls-rprx-vision` 流控，深度利用 Linux 内核 `splice` 零拷贝特性，免除任何应用层多路复用（Multiplex/h2mux）封装损耗与流中断异常，配合底层 Linux BBR 实现极速、稳定、低 CPU 占用直通。
    * **VLESS-Reality-gRPC (TCP)**：多路复用备用线路。
    * **Hysteria 2 (UDP/QUIC, 含 Salamander 混淆)**：内置 Brutal 拥塞控制与 Salamander 双向混淆保护，有效免疫运营商对 UDP 流量的主动 QoS 限速。
    * **TUIC v5 (UDP/QUIC)**：原生标准 QUIC 协议，0-RTT 极速握手，底层集成 BBR。
 2. **端到端智能带宽对齐 (Bandwidth Symmetrical Matching)**：
-   * 安装时允许自定义或默认设置 VPS 上行（`up_mbps`）与下行（`down_mbps`）带宽上限。
-   * **客户端与服务端数值严格对齐**：服务端的上传对应客户端的下载，服务端的下载对应客户端的上传，自动互为倒置匹配，确保 Brutal 算法发挥最大效益。
+   * 安装时允许自定义或默认设置 VPS 上行（默认 500 Mbps）与下行（默认 50 Mbps）带宽上限。
+   * **客户端与服务端数值严格对齐**：服务端的上传对应客户端的下载，服务端的下载对应客户端的上传，自动互为倒置匹配，确保 Hysteria 2 Brutal 算法发挥最大效益。
 3. **中国大陆域名路由阻断保护 (Ruleset)**：
    * 原生引入 SagerNet 官方 `geosite-cn.srs` 规则集，**全面阻断向中国大陆域名的出站请求**（放行 Googleapis 等必要 API），防止 VPS 被当成回国中继跳板，节省 VPS 宝贵带宽并降低 IP 风险。
    * 原生规则继续阻断 BitTorrent (BT/PT) 版权下载，防止机房 DMCA 投诉。
