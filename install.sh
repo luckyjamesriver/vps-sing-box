@@ -594,7 +594,7 @@ EOF
         "TUIC-v5"
       ],
       "url": "https://www.gstatic.com/generate_204",
-      "interval": "3m",
+      "interval": "1m",
       "tolerance": 50
     },
     {
