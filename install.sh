@@ -27,6 +27,7 @@ CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 CLIENT_DIR="${CONFIG_DIR}/client"
 CLIENT_FILE="${CLIENT_DIR}/config.json"
+ROUTER_FILE="${CLIENT_DIR}/router_nodes.json"
 INFO_FILE="${CONFIG_DIR}/node_info.json"
 CERT_KEY="${CONFIG_DIR}/cert.key"
 CERT_PEM="${CONFIG_DIR}/cert.pem"
@@ -779,6 +780,97 @@ EOF
 
     ln -sf "${CLIENT_FILE}" "${CONFIG_DIR}/client_config.json"
 
+    # 2.1 生成专用于家庭软路由 (singbox-mosdns-daed-router) 的 outbounds 节点代码块
+    cat > "${ROUTER_FILE}" <<EOF
+[
+  {
+    "type": "hysteria2",
+    "tag": "Hysteria2-PortHopping",
+    "server": "${public_ip}",
+    "server_ports": [
+      "45000:50000"
+    ],
+    "hop_interval": "30s",
+    "up_mbps": ${client_up_mbps},
+    "down_mbps": ${client_down_mbps},
+    "password": "${hy2_password}",
+    "obfs": {
+      "type": "salamander",
+      "password": "${salamander_pwd}"
+    },
+    "tls": {
+      "enabled": true,
+      "server_name": "${domain}",
+      "alpn": [
+        "h3"
+      ],
+      "insecure": true
+    }
+  },
+  {
+    "type": "hysteria2",
+    "tag": "Hysteria2",
+    "server": "${public_ip}",
+    "server_port": ${port_hy2},
+    "up_mbps": ${client_up_mbps},
+    "down_mbps": ${client_down_mbps},
+    "password": "${hy2_password}",
+    "obfs": {
+      "type": "salamander",
+      "password": "${salamander_pwd}"
+    },
+    "tls": {
+      "enabled": true,
+      "server_name": "${domain}",
+      "alpn": [
+        "h3"
+      ],
+      "insecure": true
+    }
+  },
+  {
+    "type": "tuic",
+    "tag": "TUIC-v5",
+    "server": "${public_ip}",
+    "server_port": ${port_tuic},
+    "uuid": "${uuid}",
+    "password": "${tuic_password}",
+    "congestion_control": "bbr",
+    "tls": {
+      "enabled": true,
+      "server_name": "${domain}",
+      "alpn": [
+        "h3"
+      ],
+      "insecure": true
+    }
+  },
+  {
+    "type": "vless",
+    "tag": "VLESS-Reality-Vision",
+    "server": "${public_ip}",
+    "server_port": ${port_reality_tcp},
+    "uuid": "${uuid}",
+    "flow": "xtls-rprx-vision",
+    "tls": {
+      "enabled": true,
+      "server_name": "${reality_sni}",
+      "utls": {
+        "enabled": true,
+        "fingerprint": "chrome"
+      },
+      "reality": {
+        "enabled": true,
+        "public_key": "${public_key}",
+        "short_id": "${short_id}"
+      }
+    },
+    "packet_encoding": "xudp"
+  }
+]
+EOF
+    ln -sf "${ROUTER_FILE}" "${CONFIG_DIR}/router_nodes.json"
+
     # 3. Save Node Metadata File for Easy Retrieval
     cat > "${INFO_FILE}" <<EOF
 {
@@ -881,18 +973,48 @@ show_nodes() {
     title "VLESS-Reality-Vision 二维码 (手机扫码即可导入)"
     qrencode -t ANSIUTF8 "${uri_reality_tcp}" || true
 
+    echo -e "----------------------------------------------------"
+    echo -e "${CYAN}【配套家庭软路由联动 (singbox-mosdns-daed-router)】:${PLAIN}"
+    echo -e "  - 配套项目: ${BLUE}https://github.com/luckyjamesriver/singbox-mosdns-daed-router${PLAIN}"
+    echo -e "  - 已为您自动生成旁路由专用 outbounds 节点代码块:"
+    echo -e "    ${YELLOW}${ROUTER_FILE}${PLAIN} (或 ${YELLOW}${CONFIG_DIR}/router_nodes.json${PLAIN})"
+    echo -e "  - 复制文件内的 JSON 节点直接粘贴进旁路由的 ${CYAN}/etc/sing-box/config.json${PLAIN} 即可！"
+    echo -e "----------------------------------------------------"
+
     echo -e "\n${YELLOW}提示:${PLAIN} 随时输入快捷管理命令 ${GREEN}vps${PLAIN} 即可唤出管理菜单！"
 }
 
 # --- Show Client Config JSON ---
 show_client_config() {
-    if [[ -f "${CLIENT_FILE}" ]]; then
-        title "Sing-box 完整客户端配置 (可直接导入 Sing-box 客户端)"
-        cat "${CLIENT_FILE}"
-        echo ""
-        info "该配置文件保存在: ${CLIENT_FILE}"
+    title "Sing-box 客户端与软路由配置文件"
+    echo -e "${GREEN}1.${PLAIN} 查看 完整单机客户端配置 (${CLIENT_FILE})"
+    echo -e "${GREEN}2.${PLAIN} 查看 旁路由专用 outbounds 节点代码片段 (${ROUTER_FILE:-${CONFIG_DIR}/router_nodes.json})"
+    echo ""
+    read -r -p "请输入选项 [1-2, 默认 1]: " sub_sel < /dev/tty
+    if [[ "${sub_sel}" == "2" ]]; then
+        show_router_nodes
     else
-        error "未找到客户端配置文件，请先执行安装！"
+        if [[ -f "${CLIENT_FILE}" ]]; then
+            title "Sing-box 完整单机客户端配置 (可直接导入 Sing-box 客户端)"
+            cat "${CLIENT_FILE}"
+            echo ""
+            info "该配置文件保存在: ${CLIENT_FILE}"
+        else
+            error "未找到客户端配置文件，请先执行安装！"
+        fi
+    fi
+}
+
+# --- Show Router Nodes JSON ---
+show_router_nodes() {
+    local r_file="${ROUTER_FILE:-${CONFIG_DIR}/router_nodes.json}"
+    if [[ -f "${r_file}" ]]; then
+        title "旁路由专用 outbounds 节点片段 (可直接复制进旁路由 config.json 的 outbounds 数组)"
+        cat "${r_file}"
+        echo ""
+        info "该代码块保存在: ${r_file}"
+    else
+        error "未找到旁路由节点文件: ${r_file}，请先执行安装！"
     fi
 }
 
@@ -1306,7 +1428,7 @@ menu() {
     echo -e "----------------------------------------------------"
     echo -e "${GREEN}1.${PLAIN} 安装 / 重新配置 Sing-box (4合1强力协议)"
     echo -e "${GREEN}2.${PLAIN} 查看 节点连接链接 与 二维码"
-    echo -e "${GREEN}3.${PLAIN} 查看并复制 客户端完整配置文件 (/etc/sing-box/client/config.json)"
+    echo -e "${GREEN}3.${PLAIN} 查看并复制 客户端配置文件 (单机客户端 / 旁路由节点代码块)"
     echo -e "${GREEN}4.${PLAIN} 重启 Sing-box 服务"
     echo -e "${GREEN}5.${PLAIN} 停止 Sing-box 服务"
     echo -e "${GREEN}6.${PLAIN} 查看 实时运行日志 (退出按 Ctrl+C)"
@@ -1355,6 +1477,9 @@ if [[ $# -gt 0 ]]; then
         client)
             show_client_config
             ;;
+        router|router-nodes)
+            show_router_nodes
+            ;;
         backup)
             backup_singbox
             ;;
@@ -1390,7 +1515,7 @@ if [[ $# -gt 0 ]]; then
             uninstall_flow
             ;;
         *)
-            echo "用法: $0 {install|show|client|backup|restore|restart|stop|status|logs|update|update-config|update-script|clean|uninstall}"
+            echo "用法: $0 {install|show|client|router|backup|restore|restart|stop|status|logs|update|update-config|update-script|clean|uninstall}"
             exit 1
             ;;
     esac

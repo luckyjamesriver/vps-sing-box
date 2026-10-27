@@ -7,6 +7,9 @@
 [![Sing-box Version](https://img.shields.io/badge/Sing--box-Latest-orange.svg)](https://github.com/SagerNet/sing-box)
 [![OS: Debian & Ubuntu](https://img.shields.io/badge/OS-Debian_%7C_Ubuntu-green.svg)](#准备条件)
 
+> [!TIP]
+> **家庭软路由联动推荐**：想要全屋家庭设备（Apple TV、电视盒子、手机、电脑）免客户端无感全网加速与高可用？推荐搭配配套项目 👉 **[singbox-mosdns-daed-router](https://github.com/luckyjamesriver/singbox-mosdns-daed-router)**（基于 PVE + Debian 12 + daed eBPF + MosDNS + Keepalived 双机热备架构）。本项目在安装完成时会自动生成专用于该旁路由的 outbounds 节点代码块，实现无缝对接！
+
 ---
 
 ## 🌟 核心设计理念
@@ -42,6 +45,7 @@
    * 原生写入系统内核参数，**自动激活 Linux BBR 拥塞控制**。
    * 终端自动输出各协议通用分享链接（`vless://`, `hysteria2://`, `tuic://`）与手机导入二维码。
    * 自动生成电脑/手机端 Sing-box 客户端开箱即用的完整 `client_config.json` 配置文件。
+   * **自动生成家庭旁路由专用的节点代码块 (`router_nodes.json`)**：可直接复制粘贴到 [singbox-mosdns-daed-router](https://github.com/luckyjamesriver/singbox-mosdns-daed-router) 旁路由的 `outbounds` 列表中，实现双向零门槛对接！
 
 ---
 
