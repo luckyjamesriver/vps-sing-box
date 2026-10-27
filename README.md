@@ -15,11 +15,12 @@
 
 **VPS-Sing-box** 剔除了 95% 的历史包袱，以纯粹的 Sing-box 官方核心为基础，提供：
 
-1. **顶级协议 4 合 1 黄金矩阵 (原生 Vision 零拷贝 + Hysteria2 UDP Brutal + Salamander 混淆)**：
+1. **顶级协议 4+1 黄金矩阵 (原生 Vision 零拷贝 + Hysteria2 动态端口跳跃 + TUIC-v5 + NaïveProxy HTTP/3 QUIC)**：
    * **VLESS-Reality-Vision (TCP 原生零拷贝直通)**：对齐 `v2ray-agent` 经典架构标准规范，采用原生 TCP + `xtls-rprx-vision` 流控，深度利用 Linux 内核 `splice` 零拷贝特性，免除任何应用层多路复用（Multiplex/h2mux）封装损耗与流中断异常，配合底层 Linux BBR 实现极速、稳定、低 CPU 占用直通。
    * **VLESS-Reality-gRPC (TCP)**：多路复用备用线路。
-   * **Hysteria 2 (UDP/QUIC, 含 Salamander 混淆)**：内置 Brutal 拥塞控制与 Salamander 双向混淆保护，有效免疫运营商对 UDP 流量的主动 QoS 限速。
+   * **Hysteria 2 (UDP/QUIC, 原生端口跳跃 45000:50000 + Salamander 混淆)**：内置 Brutal 拥塞控制与 Salamander 双向混淆保护，有效免疫运营商对 UDP 流量的主动 QoS 限速；**开箱原生支持 45000:50000 动态端口跳跃 (Port Hopping)**，客户端定时自动变换外部端口，彻底消除单一固定端口被风控拉黑或 QoS 掐断的风险。
    * **TUIC v5 (UDP/QUIC)**：原生标准 QUIC 协议，0-RTT 极速握手，底层集成 BBR。
+   * **全 UDP/QUIC 隧道矩阵破局能力**：天然免疫 GFW 精准丢弃 TCP SYN-ACK 的单向阻断策略，所有客户端 TCP/UDP 载荷均被封装进 QUIC 数据报中传输，实现全场景无感秒级穿透。
 2. **端到端智能带宽对齐 (Bandwidth Symmetrical Matching)**：
    * 安装时允许自定义或默认设置 VPS 上行（默认 500 Mbps）与下行（默认 50 Mbps）带宽上限。
    * **客户端与服务端数值严格对齐**：服务端的上传对应客户端的下载，服务端的下载对应客户端的上传，自动互为倒置匹配，确保 Hysteria 2 Brutal 算法发挥最大效益。
@@ -175,6 +176,68 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/vps-sing-box
 
 ---
 
+## 🛡️ 深度专题：GFW TCP 精准阻断与全 UDP/QUIC 隧道矩阵破局详解
+
+在实际运维与节点对抗中，许多用户常会遇到一种典型而诡异的“半封锁”现象：
+> **现象**：本地客户端与 VPS 之间 ping 完全正常（ICMP 畅通），UDP 测速满血无阻，但是所有基于 TCP 的节点（如 VLESS-Reality-Vision、VLESS-Reality-gRPC、Shadowsocks 2022、普通 Trojan 等）甚至连 VPS 的自定义 SSH 端口都彻底连不上，全部提示超时或握手失败！
+
+### 1. 核心机理：GFW 骨干网精准丢弃入华 TCP SYN-ACK
+
+经我们在骨干网链路层抓包（`tcpdump`）实测证实：
+1. **客户端出境 TCP SYN 可以顺利抵达境外 VPS**（VPS 服务端能够收到三次握手的第一个 SYN 包并回复 SYN-ACK）；
+2. **GFW 在国际出口骨干网对目标 IP 实施了定向 TCP 过滤**：它专门拦截并丢弃所有由该 VPS IP 发往中国大陆客户端的 `SYN-ACK` 应答包；
+3. **结果**：客户端始终收不到握手应答，重试超时后连接断开。因为拦截发生在链路层且只丢弃 TCP SYN-ACK，导致 ICMP ping、纯 UDP 流量完全不受影响。
+
+### 2. 为什么 Shadowsocks 2022 即使配置了 UDP 也无法代理网页？
+
+许多人误以为只要将 Shadowsocks 客户端配置为 `"network": "udp"` 即可绕过 TCP 封锁，实测必定全面超时失败。原因如下：
+- **Shadowsocks 是应用层 Socks5 协议代理，不是网络层虚拟隧道**；
+- 浏览器访问网页（HTTPS）发出的请求本质上是 **TCP 流量**；
+- 当 Shadowsocks 客户端收到浏览器的 TCP 请求时，它必须在底层向 VPS 的 Shadowsocks 端口建立一条真正的 TCP 连接来传输数据；
+- 此时发出的仍然是底层的 TCP SYN，同样会被 GFW 骨干网丢弃 SYN-ACK，因此根本无法建立连接。
+
+### 3. 破局之道：全 UDP/QUIC 隧道矩阵 (L4/L7 Tunnel over QUIC)
+
+要彻底绕过 GFW 的 TCP 精准丢弃策略，底层通信链路必须**百分之百运行在 UDP 上**，同时具备将客户端的 TCP 流量完整打包封装进 UDP 报文内部的能力：
+
+| 协议 | 底层传输层 | 数据封装机制 | 抗 TCP 阻断能力 | 抗 UDP QoS / 封锁手段 |
+| :--- | :--- | :--- | :--- | :--- |
+| **Hysteria 2** | 纯 UDP (QUIC) | 将 TCP/UDP 流量封装进 QUIC 数据报 | 🟢 **100% 满血突破** | **动态端口跳跃 (Port Hopping 45000:50000)** + Salamander 混淆 |
+| **TUIC v5** | 纯 UDP (QUIC) | 原生 0-RTT QUIC 隧道封装 | 🟢 **100% 满血突破** | BBR 拥塞控制 + 自定义 ALPN |
+| **NaïveProxy (QUIC 模式)** | 纯 UDP (HTTP/3) | Chromium 内核 HTTP/3 CONNECT 隧道 | 🟢 **100% 满血突破** | Chromium 原生浏览器指纹伪装（须 `"quic": true`） |
+| **VLESS Reality** | 裸 TCP 直连 | 仅对 TCP 握手做伪装，底层仍是 TCP | 🔴 **遇到 TCP 丢包直接瘫痪** | 仅依赖域名与证书伪装，无抗丢包能力 |
+| **Shadowsocks 2022** | 裸 TCP (Web) | 载荷加解密，底层仍是裸 TCP 握手 | 🔴 **遇到 TCP 丢包直接瘫痪** | 无抗丢包能力 |
+
+#### A. Hysteria 2 动态端口跳跃 (Port Hopping) 实施原理
+- **服务端**：利用 Linux iptables NAT 重定向，将高位端口段（如 `45000:50000`）的 UDP 数据包全数就地转发至 Hysteria 2 监听的固定端口：
+  ```bash
+  iptables -t nat -A PREROUTING -p udp --dport 45000:50000 -j REDIRECT --to-ports <hy2_listen_port>
+  ```
+- **客户端**：在 Sing-box 客户端出站配置中指定跳跃范围与周期：
+  ```json
+  {
+    "type": "hysteria2",
+    "tag": "Hysteria2-PortHopping",
+    "server": "your.vps.ip",
+    "server_ports": ["45000:50000"],
+    "hop_interval": "30s"
+  }
+  ```
+  客户端每 30 秒自动随机切换通信端口，由于端口不断流转，运营商的 QoS 限速探针和审查阻断规则无法在单一端口上持续收敛，彻底保证长期高速稳定。
+
+#### B. NaïveProxy HTTP/3 QUIC 模式与客户端 libcronet.so
+NaïveProxy 是业界公认伪装度极高的协议，但**默认使用 HTTP/2 (TCP) 连接**，在遇到 TCP 阻断时同样会超时。
+- 必须在客户端配置中明确开启 `"quic": true` 强制使用 HTTP/3 (UDP)。
+- **Linux 旁路由运行依赖**：Linux 环境下 Sing-box 运行 NaiveProxy 客户端需要官方 Chromium 网络库 `libcronet.so`：
+  ```bash
+  # 下载 libcronet.so 至系统共享库目录
+  curl -fsSL https://github.com/SagerNet/cronet-go/releases/download/v150.0.7871.63-2/libcronet-linux-amd64.so -o /usr/local/lib/libcronet.so
+  chmod 755 /usr/local/lib/libcronet.so
+  ldconfig
+  ```
+
+---
+
 ## ❓ 常见问题 (FAQ)
 
 #### Q1: 为什么 Hysteria 2 / TUIC 客户端提示证书不信任？
@@ -194,6 +257,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/vps-sing-box
 * **最佳解决技巧**：
   - **秒连技巧**：**在服务端更新或重启完成后，立即重启本地客户端**（例如在路由器或客户端 App 中重载/重启服务）。重启会瞬间清空所有半开死连接，并强制触发开机即时测速（Initial Health Check），只要服务端启动完成即可瞬间重连。
   - **客户端配置优化**：将客户端配置中 `urltest` 测速组的 `interval` 缩短为 `1m`（或 30s），`tolerance` 设为 `50`，即可在服务端恢复后 1 分钟内自动探测自愈，无需手动干预。
+
+#### Q5: 为什么在某些运营商网络下，Reality / SSH 连不上，而 Hysteria 2 / TUIC 却秒开？
+* 这是非常典型的 **GFW 单向丢弃入华 TCP SYN-ACK** 现象（详见上方《深度专题》）。
+* 在此网络环境下，纯 TCP 握手无法完成。请直接在客户端测速组中将 **Hysteria 2（端口跳跃或固定端口）** 或 **TUIC v5** 设为默认节点，或者使用双线热备中的纯 UDP 矩阵，即可无视一切 TCP 阻断满血上网。
 
 ---
 

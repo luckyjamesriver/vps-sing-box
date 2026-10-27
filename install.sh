@@ -279,6 +279,44 @@ allow_ports() {
     fi
 }
 
+# --- Configure Port Hopping (NAT Redirect for Hysteria 2) ---
+configure_port_hopping() {
+    local hy2_port="$1"
+    local hopping_range="45000:50000"
+    info "配置 Hysteria 2 端口跳跃规则 (${hopping_range}/udp -> ${hy2_port})..."
+
+    # 1. 防火墙放行跳跃端口段
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+        ufw allow "${hopping_range}/udp" comment 'Hy2 Port Hopping' >/dev/null 2>&1 || true
+    fi
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -I INPUT -p udp --dport 45000:50000 -j ACCEPT >/dev/null 2>&1 || true
+    fi
+
+    # 2. 持久化至 /etc/ufw/before.rules (若使用 UFW)
+    if [[ -f /etc/ufw/before.rules ]]; then
+        if ! grep -q "\*nat" /etc/ufw/before.rules; then
+            cat << UFW_NAT_EOF | cat - /etc/ufw/before.rules > /tmp/ufw_before.rules && mv /tmp/ufw_before.rules /etc/ufw/before.rules
+*nat
+:PREROUTING ACCEPT [0:0]
+-A PREROUTING -p udp --dport 45000:50000 -j REDIRECT --to-ports ${hy2_port}
+COMMIT
+
+UFW_NAT_EOF
+        else
+            sed -i "/--dport 45000:50000/d" /etc/ufw/before.rules
+            sed -i "/\*nat/a -A PREROUTING -p udp --dport 45000:50000 -j REDIRECT --to-ports ${hy2_port}" /etc/ufw/before.rules
+        fi
+        ufw reload >/dev/null 2>&1 || true
+    fi
+
+    # 3. 运行时即刻写入 iptables NAT PREROUTING
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -t nat -D PREROUTING -p udp --dport 45000:50000 -j REDIRECT --to-ports "${hy2_port}" >/dev/null 2>&1 || true
+        iptables -t nat -A PREROUTING -p udp --dport 45000:50000 -j REDIRECT --to-ports "${hy2_port}" >/dev/null 2>&1 || true
+    fi
+}
+
 # --- Main Configuration Generator ---
 generate_configs() {
     local domain="$1"
@@ -371,6 +409,7 @@ generate_configs() {
     echo -e "  - TUIC v5            (UDP)   : ${GREEN}${port_tuic}${PLAIN}"
 
     allow_ports "${port_reality_tcp}" "${port_reality_grpc}" "${port_hy2}" "${port_tuic}"
+    configure_port_hopping "${port_hy2}"
 
     # 证书处理：如果证书已存在且匹配域名则复用，否则重新生成
     if [[ -f "${CERT_PEM}" && -f "${CERT_KEY}" ]] && openssl x509 -in "${CERT_PEM}" -text -noout 2>/dev/null | grep -q "${domain}"; then
@@ -579,6 +618,7 @@ EOF
         "VLESS-Reality-Vision",
         "VLESS-Reality-gRPC",
         "Hysteria2",
+        "Hysteria2-PortHopping",
         "TUIC-v5",
         "auto"
       ],
@@ -591,9 +631,10 @@ EOF
         "VLESS-Reality-Vision",
         "VLESS-Reality-gRPC",
         "Hysteria2",
+        "Hysteria2-PortHopping",
         "TUIC-v5"
       ],
-      "url": "https://www.gstatic.com/generate_204",
+      "url": "https://cp.cloudflare.com/generate_204",
       "interval": "1m",
       "tolerance": 50
     },
@@ -649,6 +690,30 @@ EOF
       "tag": "Hysteria2",
       "server": "${public_ip}",
       "server_port": ${port_hy2},
+      "up_mbps": ${client_up_mbps},
+      "down_mbps": ${client_down_mbps},
+      "password": "${hy2_password}",
+      "obfs": {
+        "type": "salamander",
+        "password": "${salamander_pwd}"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "${domain}",
+        "alpn": [
+          "h3"
+        ],
+        "insecure": true
+      }
+    },
+    {
+      "type": "hysteria2",
+      "tag": "Hysteria2-PortHopping",
+      "server": "${public_ip}",
+      "server_ports": [
+        "45000:50000"
+      ],
+      "hop_interval": "30s",
       "up_mbps": ${client_up_mbps},
       "down_mbps": ${client_down_mbps},
       "password": "${hy2_password}",
@@ -727,6 +792,7 @@ EOF
   "port_reality_tcp": ${port_reality_tcp},
   "port_reality_grpc": ${port_reality_grpc},
   "port_hy2": ${port_hy2},
+  "hy2_port_range": "45000:50000",
   "hy2_password": "${hy2_password}",
   "salamander_pwd": "${salamander_pwd}",
   "port_tuic": ${port_tuic},
@@ -791,6 +857,7 @@ show_nodes() {
     local uri_reality_tcp="vless://${uuid}@${public_ip}:${port_reality_tcp}?encryption=none&security=reality&sni=${reality_sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&flow=xtls-rprx-vision#VLESS-Reality-Vision"
     local uri_reality_grpc="vless://${uuid}@${public_ip}:${port_reality_grpc}?encryption=none&security=reality&sni=${reality_sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=grpc&serviceName=grpc-service#VLESS-Reality-gRPC"
     local uri_hy2="hysteria2://${hy2_password}@${public_ip}:${port_hy2}/?insecure=1&sni=${domain}&obfs=salamander&obfs-password=${salamander_pwd}#Hysteria2"
+    local uri_hy2_hop="hysteria2://${hy2_password}@${public_ip}:45000-50000/?insecure=1&sni=${domain}&obfs=salamander&obfs-password=${salamander_pwd}#Hysteria2-PortHopping"
     local uri_tuic="tuic://${uuid}:${tuic_password}@${public_ip}:${port_tuic}?congestion_control=bbr&alpn=h3&sni=${domain}&allow_insecure=1#TUIC-v5"
 
     title "Sing-box 专属节点与连接链接"
@@ -805,7 +872,8 @@ show_nodes() {
     echo -e "   ${BLUE}${uri_reality_grpc}${PLAIN}\n"
 
     echo -e "${GREEN}3. Hysteria 2 (UDP 晚高峰暴力加速, 含 Salamander 混淆):${PLAIN}"
-    echo -e "   ${BLUE}${uri_hy2}${PLAIN}\n"
+    echo -e "   • 固定端口: ${BLUE}${uri_hy2}${PLAIN}"
+    echo -e "   • 端口跳跃 (45000-50000 防封/防QoS): ${BLUE}${uri_hy2_hop}${PLAIN}\n"
 
     echo -e "${GREEN}4. TUIC v5 (UDP 0-RTT 极速 QUIC):${PLAIN}"
     echo -e "   ${BLUE}${uri_tuic}${PLAIN}\n"
