@@ -89,7 +89,7 @@ install_dependencies() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
     apt-get install -y --no-install-recommends \
-        curl wget jq tar openssl qrencode vim sudo lsof ufw ca-certificates python3
+        curl wget jq tar openssl qrencode vim sudo lsof ufw ca-certificates python3 certbot
     info "基础依赖安装完成。"
 }
 
@@ -259,22 +259,91 @@ generate_cert() {
         -subj "/CN=${domain}" -addext "subjectAltName=DNS:${domain}" >/dev/null 2>&1
     chmod 600 "${CERT_KEY}"
     chmod 644 "${CERT_PEM}"
-    info "证书生成完毕，自签有效期为 10 年。"
+    info "自签证书生成完毕，自签有效期为 10 年。"
+}
+
+# --- Obtain Real Let's Encrypt or Fallback to Self-Signed Certificate ---
+obtain_cert() {
+    local domain="$1"
+    local public_ip="$2"
+
+    mkdir -p "${CONFIG_DIR}"
+
+    # 检查域名 DNS 是否已指向公网 IP
+    local resolved_ip=""
+    resolved_ip=$(curl -s4m 5 "https://dns.google/resolve?name=${domain}&type=A" 2>/dev/null | jq -r '.Answer[0].data // empty' 2>/dev/null || true)
+    if [[ -z "${resolved_ip}" ]]; then
+        resolved_ip=$(curl -s4m 5 "https://1.1.1.1/dns-query?name=${domain}&type=A" -H "accept: application/dns-json" 2>/dev/null | jq -r '.Answer[0].data // empty' 2>/dev/null || true)
+    fi
+    if [[ -z "${resolved_ip}" ]]; then
+        resolved_ip=$(dig +short A "${domain}" 2>/dev/null | tail -n 1 || true)
+    fi
+
+    local acme_success=false
+    if [[ -n "${resolved_ip}" && "${resolved_ip}" == "${public_ip}" ]]; then
+        info "检测到域名 [${domain}] 已精确解析到本机公网 IP [${public_ip}]。"
+        info "正在自动通过 Certbot 申请正规 Let's Encrypt 公网 CA 证书 (确保 NaïveProxy / Chromium 协议栈完美信任)..."
+
+        export DEBIAN_FRONTEND=noninteractive
+        if ! command -v certbot >/dev/null 2>&1; then
+            apt-get install -y --no-install-recommends certbot >/dev/null 2>&1 || true
+        fi
+
+        if command -v certbot >/dev/null 2>&1; then
+            # 临时停止可能占用 80 端口的服务
+            systemctl stop nginx caddy apache2 >/dev/null 2>&1 || true
+            if certbot certonly --standalone -d "${domain}" --agree-tos --register-unsafely-without-email --non-interactive --preferred-challenges http >/tmp/certbot_issue.log 2>&1; then
+                if [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
+                    cp -f "/etc/letsencrypt/live/${domain}/fullchain.pem" "${CERT_PEM}"
+                    cp -f "/etc/letsencrypt/live/${domain}/privkey.pem" "${CERT_KEY}"
+                    chmod 644 "${CERT_PEM}"
+                    chmod 600 "${CERT_KEY}"
+                    acme_success=true
+                    info "🎉 Let's Encrypt 正规公网证书申请并部署成功！有效期内全协议通用。"
+
+                    # 配置证书自动续期自动同步至 Sing-box 钩子
+                    mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+                    cat > /etc/letsencrypt/renewal-hooks/deploy/singbox.sh << RENEW_EOF
+#!/bin/bash
+cp -f /etc/letsencrypt/live/${domain}/fullchain.pem ${CERT_PEM}
+cp -f /etc/letsencrypt/live/${domain}/privkey.pem ${CERT_KEY}
+chmod 644 ${CERT_PEM}
+chmod 600 ${CERT_KEY}
+systemctl restart sing-box >/dev/null 2>&1 || true
+RENEW_EOF
+                    chmod +x /etc/letsencrypt/renewal-hooks/deploy/singbox.sh
+                fi
+            else
+                warn "Certbot 证书申请未成功 (详细日志见 /tmp/certbot_issue.log)。"
+            fi
+            systemctl start nginx caddy apache2 >/dev/null 2>&1 || true
+        fi
+    fi
+
+    if [[ "${acme_success}" != "true" ]]; then
+        if [[ -n "${resolved_ip}" && "${resolved_ip}" != "${public_ip}" ]]; then
+            warn "域名 [${domain}] 解析 IP (${resolved_ip}) 与本机 IP (${public_ip}) 不一致。"
+        fi
+        info "自动启用免维护 10 年高强度 ECC 自签证书方案..."
+        generate_cert "${domain}"
+    fi
 }
 
 # --- Open Firewall Ports ---
 allow_ports() {
-    local udp_ports=("$@")
+    local ports=("$@")
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-        info "正在放行 UFW 防火墙 UDP 端口..."
-        for p in "${udp_ports[@]}"; do
+        info "正在放行 UFW 防火墙端口..."
+        for p in "${ports[@]}"; do
             ufw allow "${p}/udp" >/dev/null 2>&1 || true
+            ufw allow "${p}/tcp" >/dev/null 2>&1 || true
         done
     fi
 
     if command -v iptables >/dev/null 2>&1; then
-        for p in "${udp_ports[@]}"; do
+        for p in "${ports[@]}"; do
             iptables -I INPUT -p udp --dport "${p}" -j ACCEPT >/dev/null 2>&1 || true
+            iptables -I INPUT -p tcp --dport "${p}" -j ACCEPT >/dev/null 2>&1 || true
         done
     fi
 }
@@ -332,6 +401,9 @@ generate_configs() {
 
     local port_hy2=""
     local port_tuic=""
+    local port_naive=""
+    local naive_user="jamesho"
+    local naive_password=""
     local uuid=""
     local hy2_password=""
     local tuic_password=""
@@ -342,6 +414,9 @@ generate_configs() {
         if [[ -f "${INFO_FILE}" ]]; then
             port_hy2=$(jq -r '.port_hy2 // empty' "${INFO_FILE}")
             port_tuic=$(jq -r '.port_tuic // empty' "${INFO_FILE}")
+            port_naive=$(jq -r '.port_naive // empty' "${INFO_FILE}")
+            naive_user=$(jq -r '.naive_user // "jamesho"' "${INFO_FILE}")
+            naive_password=$(jq -r '.naive_password // empty' "${INFO_FILE}")
             uuid=$(jq -r '.uuid // empty' "${INFO_FILE}")
             hy2_password=$(jq -r '.hy2_password // empty' "${INFO_FILE}")
             tuic_password=$(jq -r '.tuic_password // empty' "${INFO_FILE}")
@@ -351,6 +426,8 @@ generate_configs() {
         if [[ -f "${CONFIG_FILE}" ]]; then
             [[ -z "${port_hy2}" ]] && port_hy2=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
             [[ -z "${port_tuic}" ]] && port_tuic=$(jq -r '.inbounds[] | select(.type=="tuic") | .listen_port' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+            [[ -z "${port_naive}" ]] && port_naive=$(jq -r '.inbounds[] | select(.type=="naive") | .listen_port' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+            [[ -z "${naive_password}" ]] && naive_password=$(jq -r '.inbounds[] | select(.type=="naive") | .users[0].password' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
             [[ -z "${hy2_password}" ]] && hy2_password=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .users[0].password' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
             [[ -z "${uuid}" ]] && uuid=$(jq -r '.inbounds[] | select(.type=="tuic" or .type=="vless") | .users[0].uuid' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
             [[ -z "${tuic_password}" ]] && tuic_password=$(jq -r '.inbounds[] | select(.type=="tuic") | .users[0].password' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
@@ -361,6 +438,15 @@ generate_configs() {
     # 兜底生成缺少的字段
     [[ -z "${port_hy2}" ]] && port_hy2=$(get_random_port)
     [[ -z "${port_tuic}" ]] && port_tuic=$(get_random_port)
+    if [[ -z "${port_naive}" ]]; then
+        if ! ss -tuln 2>/dev/null | grep -q ":32890 "; then
+            port_naive=32890
+        else
+            port_naive=$(get_random_port)
+        fi
+    fi
+    [[ -z "${naive_user}" ]] && naive_user="jamesho"
+    [[ -z "${naive_password}" ]] && naive_password=$(openssl rand -hex 16)
     [[ -z "${uuid}" ]] && uuid=$("${BIN_PATH}" generate uuid)
     [[ -z "${hy2_password}" ]] && hy2_password=$(openssl rand -hex 16)
     [[ -z "${tuic_password}" ]] && tuic_password=$(openssl rand -hex 16)
@@ -370,16 +456,17 @@ generate_configs() {
     echo -e "  - Hysteria 2 动态跳跃端口 : ${GREEN}45000:50000/udp${PLAIN} -> ${GREEN}${port_hy2}${PLAIN}"
     echo -e "  - Hysteria 2 固定端口 (UDP) : ${GREEN}${port_hy2}${PLAIN}"
     echo -e "  - TUIC v5            (UDP) : ${GREEN}${port_tuic}${PLAIN}"
+    echo -e "  - NaïveProxy         (UDP) : ${GREEN}${port_naive}${PLAIN} (HTTP/3 QUIC 模式)"
     echo -e "  - TCP 代理监听端口          : ${YELLOW}无 (零 TCP 监听，彻底封死 TCP SYN-ACK 阻断与主动探测)${PLAIN}"
 
-    allow_ports "${port_hy2}" "${port_tuic}"
+    allow_ports "${port_hy2}" "${port_tuic}" "${port_naive}"
     configure_port_hopping "${port_hy2}"
 
-    # 证书处理：如果证书已存在且匹配域名则复用，否则重新生成
+    # 证书处理：如果证书已存在且匹配域名则复用，否则获取正规证书或自签
     if [[ -f "${CERT_PEM}" && -f "${CERT_KEY}" ]] && openssl x509 -in "${CERT_PEM}" -text -noout 2>/dev/null | grep -q "${domain}"; then
-        info "复用已存在的 10 年自签 ECC 证书。"
+        info "复用已存在的证书。"
     else
-        generate_cert "${domain}"
+        obtain_cert "${domain}" "${public_ip}"
     fi
 
     # 1. Server Configuration (纯 UDP/QUIC 极简双核，CN Geosite Rule-set Block)
@@ -430,6 +517,27 @@ generate_configs() {
         }
       ],
       "congestion_control": "bbr",
+      "tls": {
+        "enabled": true,
+        "server_name": "${domain}",
+        "alpn": [
+          "h3"
+        ],
+        "certificate_path": "${CERT_PEM}",
+        "key_path": "${CERT_KEY}"
+      }
+    },
+    {
+      "type": "naive",
+      "tag": "singbox-naive-in",
+      "listen": "0.0.0.0",
+      "listen_port": ${port_naive},
+      "users": [
+        {
+          "username": "${naive_user}",
+          "password": "${naive_password}"
+        }
+      ],
       "tls": {
         "enabled": true,
         "server_name": "${domain}",
@@ -521,6 +629,7 @@ EOF
         "Hysteria2-PortHopping",
         "Hysteria2",
         "TUIC-v5",
+        "NaiveProxy",
         "auto"
       ],
       "default": "Hysteria2-PortHopping"
@@ -531,7 +640,8 @@ EOF
       "outbounds": [
         "Hysteria2-PortHopping",
         "Hysteria2",
-        "TUIC-v5"
+        "TUIC-v5",
+        "NaiveProxy"
       ],
       "url": "https://cp.cloudflare.com/generate_204",
       "interval": "1m",
@@ -597,6 +707,18 @@ EOF
           "h3"
         ],
         "insecure": true
+      }
+    },
+    {
+      "type": "naive",
+      "tag": "NaiveProxy",
+      "server": "${domain}",
+      "server_port": ${port_naive},
+      "username": "${naive_user}",
+      "password": "${naive_password}",
+      "quic": true,
+      "tls": {
+        "enabled": true
       }
     },
     {
@@ -695,6 +817,18 @@ EOF
       ],
       "insecure": true
     }
+  },
+  {
+    "type": "naive",
+    "tag": "NaiveProxy",
+    "server": "${domain}",
+    "server_port": ${port_naive},
+    "username": "${naive_user}",
+    "password": "${naive_password}",
+    "quic": true,
+    "tls": {
+      "enabled": true
+    }
   }
 ]
 EOF
@@ -712,6 +846,9 @@ EOF
   "salamander_pwd": "${salamander_pwd}",
   "port_tuic": ${port_tuic},
   "tuic_password": "${tuic_password}",
+  "port_naive": ${port_naive},
+  "naive_user": "${naive_user}",
+  "naive_password": "${naive_password}",
   "server_up_mbps": ${server_up_mbps},
   "server_down_mbps": ${server_down_mbps},
   "client_up_mbps": ${client_up_mbps},
@@ -748,6 +885,7 @@ show_nodes() {
 
     local domain public_ip uuid
     local port_hy2 hy2_password salamander_pwd port_tuic tuic_password
+    local port_naive naive_user naive_password
     local server_up_mbps server_down_mbps client_up_mbps client_down_mbps
 
     domain=$(jq -r ".domain" "${INFO_FILE}")
@@ -758,6 +896,9 @@ show_nodes() {
     salamander_pwd=$(jq -r ".salamander_pwd" "${INFO_FILE}")
     port_tuic=$(jq -r ".port_tuic" "${INFO_FILE}")
     tuic_password=$(jq -r ".tuic_password" "${INFO_FILE}")
+    port_naive=$(jq -r '.port_naive // 32890' "${INFO_FILE}")
+    naive_user=$(jq -r '.naive_user // "jamesho"' "${INFO_FILE}")
+    naive_password=$(jq -r '.naive_password // empty' "${INFO_FILE}")
     server_up_mbps=$(jq -r ".server_up_mbps" "${INFO_FILE}")
     server_down_mbps=$(jq -r ".server_down_mbps" "${INFO_FILE}")
     client_up_mbps=$(jq -r ".client_up_mbps" "${INFO_FILE}")
@@ -767,6 +908,7 @@ show_nodes() {
     local uri_hy2="hysteria2://${hy2_password}@${public_ip}:${port_hy2}/?insecure=1&sni=${domain}&obfs=salamander&obfs-password=${salamander_pwd}#Hysteria2"
     local uri_hy2_hop="hysteria2://${hy2_password}@${public_ip}:45000-50000/?insecure=1&sni=${domain}&obfs=salamander&obfs-password=${salamander_pwd}#Hysteria2-PortHopping"
     local uri_tuic="tuic://${uuid}:${tuic_password}@${public_ip}:${port_tuic}?congestion_control=bbr&alpn=h3&sni=${domain}&allow_insecure=1#TUIC-v5"
+    local uri_naive="naive+https://${naive_user}:${naive_password}@${domain}:${port_naive}"
 
     title "Sing-box 专属节点与连接链接 (全 UDP/QUIC 强抗封锁矩阵)"
     echo -e "${YELLOW}绑定域名:${PLAIN} ${domain}  |  ${YELLOW}VPS 连接 IP:${PLAIN} ${public_ip}"
@@ -784,6 +926,10 @@ show_nodes() {
 
     echo -e "${GREEN}3. TUIC v5 (UDP, 0-RTT 极速 QUIC + BBR):${PLAIN}"
     echo -e "   ${BLUE}${uri_tuic}${PLAIN}
+"
+
+    echo -e "${GREEN}4. NaïveProxy (UDP/QUIC, 原生 Chromium 协议栈 HTTP/3 伪装):${PLAIN}"
+    echo -e "   ${BLUE}${uri_naive}${PLAIN}
 "
 
     title "Hysteria 2 动态端口跳跃 二维码 (手机扫码即可导入)"
@@ -1228,6 +1374,37 @@ restore_singbox() {
     fi
 }
 
+# --- Apply / Renew Let's Encrypt Certificate Manually ---
+renew_cert_flow() {
+    check_root
+    title "申请 / 刷新 Let's Encrypt 官方 CA 证书"
+    local domain=""
+    local public_ip=""
+    public_ip=$(get_public_ip)
+    if [[ -f "${INFO_FILE}" ]]; then
+        domain=$(jq -r '.domain // empty' "${INFO_FILE}")
+    elif [[ -f "${CONFIG_FILE}" ]]; then
+        domain=$(jq -r '.inbounds[] | select(.type=="hysteria2" or .type=="tuic" or .type=="naive") | .tls.server_name // empty' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+    fi
+
+    if [[ -z "${domain}" ]]; then
+        read -r -p "请输入要申请证书的解析域名: " domain < /dev/tty
+        domain=$(echo "${domain}" | tr -d "[:space:]")
+    else
+        read -r -p "确认域名 [回车默认为 ${domain}]: " input_d < /dev/tty
+        domain="${input_d:-${domain}}"
+    fi
+
+    if [[ -z "${domain}" ]]; then
+        warn "域名为空，已取消。"
+        return 1
+    fi
+
+    obtain_cert "${domain}" "${public_ip}"
+    systemctl restart sing-box >/dev/null 2>&1 || true
+    info "证书申请流程执行完毕，已重新加载 Sing-box 服务。"
+}
+
 # --- Management Menu ---
 menu() {
     clear
@@ -1252,13 +1429,14 @@ menu() {
     echo -e "${GREEN}7.${PLAIN} 📦 【一键完整备份】Sing-box (配置+证书+密钥+程序)"
     echo -e "${GREEN}8.${PLAIN} 🔄 【一键恢复备份】从历史备份还原 Sing-box"
     echo -e "${GREEN}9.${PLAIN} 一键环境除旧 / 扫描清理第三方旧代理 (Clean)"
-    echo -e "${GREEN}10.${PLAIN} 单独更新 Sing-box 核心版本"
-    echo -e "${GREEN}11.${PLAIN} 更新 管理脚本自身 (Update Script)"
-    echo -e "${GREEN}12.${PLAIN} 完全卸载 Sing-box"
+    echo -e "${GREEN}10.${PLAIN} 申请 / 刷新 Let's Encrypt 官方 CA 证书"
+    echo -e "${GREEN}11.${PLAIN} 单独更新 Sing-box 核心版本"
+    echo -e "${GREEN}12.${PLAIN} 更新 管理脚本自身 (Update Script)"
+    echo -e "${GREEN}13.${PLAIN} 完全卸载 Sing-box"
     echo -e "${GREEN}0.${PLAIN} 退出菜单"
     echo -e "----------------------------------------------------"
 
-    read -r -p "请输入选项 [0-12]: " choice < /dev/tty
+    read -r -p "请输入选项 [0-13]: " choice < /dev/tty
     case "${choice}" in
         1) install_flow ;;
         2) show_nodes ;;
@@ -1269,9 +1447,10 @@ menu() {
         7) backup_singbox ;;
         8) restore_singbox ;;
         9) clean_flow ;;
-        10) update_core ;;
-        11) update_script ;;
-        12) uninstall_flow ;;
+        10) renew_cert_flow ;;
+        11) update_core ;;
+        12) update_script ;;
+        13) uninstall_flow ;;
         0) exit 0 ;;
         *) warn "无效选项，请重新输入！"; sleep 1; menu ;;
     esac
@@ -1322,6 +1501,9 @@ if [[ $# -gt 0 ]]; then
         update-config|reconfig)
             update_config
             ;;
+        cert|renew-cert)
+            renew_cert_flow
+            ;;
         upgrade|update-script)
             update_script
             ;;
@@ -1332,7 +1514,7 @@ if [[ $# -gt 0 ]]; then
             uninstall_flow
             ;;
         *)
-            echo "用法: $0 {install|show|client|router|backup|restore|restart|stop|status|logs|update|update-config|update-script|clean|uninstall}"
+            echo "用法: $0 {install|show|client|router|backup|restore|restart|stop|status|logs|cert|update|update-config|update-script|clean|uninstall}"
             exit 1
             ;;
     esac

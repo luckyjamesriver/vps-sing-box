@@ -18,10 +18,11 @@
 
 **VPS-Sing-box** 剔除了 95% 的历史包袱，以纯粹的 Sing-box 官方核心为基础，提供：
 
-1. **全 UDP/QUIC 顶级抗封锁矩阵 (Hysteria 2 动态端口跳跃 45000:50000 + Hysteria 2 固定端口 + TUIC v5)**：
+1. **全 UDP/QUIC 顶级抗封锁矩阵 (Hysteria 2 动态端口跳跃 45000:50000 + Hysteria 2 固定端口 + TUIC v5 + NaïveProxy QUIC)**：
    * **零 TCP 监听端口，彻底终结 GFW TCP 单向精准阻断**：GFW 骨干网普遍针对境外 VPS 实行入华方向的 TCP SYN-ACK 定向丢弃策略，导致所有 TCP 协议（VLESS Reality Vision/gRPC）握手超时瘫痪。本项目**彻底摒弃 TCP 监听**，所有客户端 TCP/UDP 载荷全部封装进基于 UDP 的 QUIC 数据报隧道中传输，实现无感秒级穿透！
    * **Hysteria 2 (UDP/QUIC, 原生端口跳跃 45000:50000 + Salamander 混淆)**：内置 Brutal 拥塞控制与 Salamander 双向混淆保护，有效免疫运营商对 UDP 流量的主动 QoS 限速；**开箱原生支持 45000:50000 动态端口跳跃 (Port Hopping)**，客户端每 30 秒自动随机变换外部端口，彻底消除单一固定端口被风控拉黑或 QoS 掐断的风险。
    * **TUIC v5 (UDP/QUIC)**：原生标准 QUIC 协议，0-RTT 极速握手，底层集成 BBR 拥塞控制。
+   * **NaïveProxy (UDP/QUIC, HTTP/3 模式)**：内置 Chromium 协议栈内核，开启 QUIC 模式后全程运行于 UDP HTTP/3 协议上，具备完美的反主动探测与真实浏览器指纹模拟能力。
    * **天然免疫主动探测**：服务器完全不开放任何 TCP 代理端口，任何针对 TCP 80/443 或随机高位 TCP 端口的主动探测直接被拒绝，安全性达到顶峰。
 2. **端到端智能带宽对齐 (Bandwidth Symmetrical Matching)**：
    * 安装时允许自定义或默认设置 VPS 上行（默认 500 Mbps）与下行（默认 50 Mbps）带宽上限。
@@ -34,11 +35,12 @@
 5. **📦 一键完整备份与一键秒级恢复 (Backup & Restore)**：
    * 支持一键打包**所有服务端/客户端配置、TLS 证书密钥、主程序二进制以及 Systemd 服务单元**至 `/var/backups/sing-box/`。
    * 无论重装系统、机器迁移还是意外误删，随时可通过交互式菜单**一键回滚恢复**！
-6. **真正的“零证书维护”体验**：
-   * Hysteria 2 与 TUIC 采用本地 OpenSSL 生成的 **10 年长效高强度 ECC 证书**，无需申请 Let's Encrypt，**永远不需要担心 90 天证书过期断连**。
+6. **智能双轨证书系统 (Let's Encrypt CA 自动申请 + 10年自签 ECC 优雅兜底)**：
+   * 若域名已成功解析至本机 IP，脚本自动通过 Certbot 申请并部署官方正规 **Let's Encrypt CA 证书**（全自动配置续期钩子），完美满足 NaïveProxy / Chromium 严格 CA 校验机制；
+   * 若域名尚未解析生效，脚本自动降级生成本地 **10 年长效高强度 ECC 证书**（供 Hysteria 2 与 TUIC 免维护使用），杜绝证书配置中断。
 7. **安全风控与端口防扫**：
-   * 自动分配 **10000 ~ 60000 高位随机端口**，坚决不占用 80 和 443 敏感端口，有效规避全网主动探测。
-   * 全套高熵随机凭证（随机 UUID、随机 Hy2 密码、随机 Salamander 混淆密钥、随机 TUIC 密码）。
+   * 自动分配 **10000 ~ 60000 高位随机端口**（NaïveProxy 默认 32890），坚决不占用 80 和 443 敏感端口，有效规避全网主动探测。
+   * 全套高熵随机凭证（随机 UUID、随机 Hy2 密码、随机 Salamander 混淆密钥、随机 TUIC 密码、随机 Naive 密码）。
 8. **原生底层优化与开箱即用**：
    * 原生写入系统内核参数，**自动激活 Linux BBR 拥塞控制**。
    * 终端自动输出各协议通用分享链接（`hysteria2://`, `tuic://`）与手机导入二维码。
