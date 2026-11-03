@@ -402,7 +402,7 @@ generate_configs() {
     local port_hy2=""
     local port_tuic=""
     local port_naive=""
-    local naive_user="jamesho"
+    local naive_user="singbox_user"
     local naive_password=""
     local uuid=""
     local hy2_password=""
@@ -415,7 +415,7 @@ generate_configs() {
             port_hy2=$(jq -r '.port_hy2 // empty' "${INFO_FILE}")
             port_tuic=$(jq -r '.port_tuic // empty' "${INFO_FILE}")
             port_naive=$(jq -r '.port_naive // empty' "${INFO_FILE}")
-            naive_user=$(jq -r '.naive_user // "jamesho"' "${INFO_FILE}")
+            naive_user=$(jq -r '.naive_user // "singbox_user"' "${INFO_FILE}")
             naive_password=$(jq -r '.naive_password // empty' "${INFO_FILE}")
             uuid=$(jq -r '.uuid // empty' "${INFO_FILE}")
             hy2_password=$(jq -r '.hy2_password // empty' "${INFO_FILE}")
@@ -445,7 +445,7 @@ generate_configs() {
             port_naive=$(get_random_port)
         fi
     fi
-    [[ -z "${naive_user}" ]] && naive_user="jamesho"
+    [[ -z "${naive_user}" ]] && naive_user="singbox_user"
     [[ -z "${naive_password}" ]] && naive_password=$(openssl rand -hex 16)
     [[ -z "${uuid}" ]] && uuid=$("${BIN_PATH}" generate uuid)
     [[ -z "${hy2_password}" ]] && hy2_password=$(openssl rand -hex 16)
@@ -897,7 +897,7 @@ show_nodes() {
     port_tuic=$(jq -r ".port_tuic" "${INFO_FILE}")
     tuic_password=$(jq -r ".tuic_password" "${INFO_FILE}")
     port_naive=$(jq -r '.port_naive // 32890' "${INFO_FILE}")
-    naive_user=$(jq -r '.naive_user // "jamesho"' "${INFO_FILE}")
+    naive_user=$(jq -r '.naive_user // "singbox_user"' "${INFO_FILE}")
     naive_password=$(jq -r '.naive_password // empty' "${INFO_FILE}")
     server_up_mbps=$(jq -r ".server_up_mbps" "${INFO_FILE}")
     server_down_mbps=$(jq -r ".server_down_mbps" "${INFO_FILE}")
