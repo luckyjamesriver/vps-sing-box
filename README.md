@@ -1,6 +1,6 @@
 # VPS-Sing-box 🚀
 
-> 极致精简、原生性能、免证书维护的 Sing-box 四合一全能服务端一键部署脚本。
+> 极致精简、原生性能、免证书维护的 Sing-box 全 UDP/QUIC 强抗封锁极简服务端一键部署脚本。
 > 专为追求干净、纯粹、高抗封锁与高速连接的 VPS 用户打造。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -14,16 +14,15 @@
 
 ## 🌟 核心设计理念
 
-传统的全能脚本往往动辄上万行代码，强行捆绑 Nginx、acme.sh 证书续期、静态伪装站等复杂组件。对于现代的 **Reality、Hysteria 2、TUIC** 协议而言，这些传统组件不仅是冗余的，还会占用额外内存、引发端口冲突或证书过期断连。
+传统的全能脚本往往动辄上万行代码，强行捆绑 Nginx、acme.sh 证书续期、静态伪装站等复杂组件。对于现代的 **Hysteria 2、TUIC** 纯 UDP/QUIC 协议而言，这些传统组件不仅是冗余的，还会占用额外内存、引发端口冲突或证书过期断连。
 
 **VPS-Sing-box** 剔除了 95% 的历史包袱，以纯粹的 Sing-box 官方核心为基础，提供：
 
-1. **顶级协议 4+1 黄金矩阵 (原生 Vision 零拷贝 + Hysteria2 动态端口跳跃 + TUIC-v5 + NaïveProxy HTTP/3 QUIC)**：
-   * **VLESS-Reality-Vision (TCP 原生零拷贝直通)**：对齐 `v2ray-agent` 经典架构标准规范，采用原生 TCP + `xtls-rprx-vision` 流控，深度利用 Linux 内核 `splice` 零拷贝特性，免除任何应用层多路复用（Multiplex/h2mux）封装损耗与流中断异常，配合底层 Linux BBR 实现极速、稳定、低 CPU 占用直通。
-   * **VLESS-Reality-gRPC (TCP)**：多路复用备用线路。
-   * **Hysteria 2 (UDP/QUIC, 原生端口跳跃 45000:50000 + Salamander 混淆)**：内置 Brutal 拥塞控制与 Salamander 双向混淆保护，有效免疫运营商对 UDP 流量的主动 QoS 限速；**开箱原生支持 45000:50000 动态端口跳跃 (Port Hopping)**，客户端定时自动变换外部端口，彻底消除单一固定端口被风控拉黑或 QoS 掐断的风险。
-   * **TUIC v5 (UDP/QUIC)**：原生标准 QUIC 协议，0-RTT 极速握手，底层集成 BBR。
-   * **全 UDP/QUIC 隧道矩阵破局能力**：天然免疫 GFW 精准丢弃 TCP SYN-ACK 的单向阻断策略，所有客户端 TCP/UDP 载荷均被封装进 QUIC 数据报中传输，实现全场景无感秒级穿透。
+1. **全 UDP/QUIC 顶级抗封锁矩阵 (Hysteria 2 动态端口跳跃 45000:50000 + Hysteria 2 固定端口 + TUIC v5)**：
+   * **零 TCP 监听端口，彻底终结 GFW TCP 单向精准阻断**：GFW 骨干网普遍针对境外 VPS 实行入华方向的 TCP SYN-ACK 定向丢弃策略，导致所有 TCP 协议（VLESS Reality Vision/gRPC）握手超时瘫痪。本项目**彻底摒弃 TCP 监听**，所有客户端 TCP/UDP 载荷全部封装进基于 UDP 的 QUIC 数据报隧道中传输，实现无感秒级穿透！
+   * **Hysteria 2 (UDP/QUIC, 原生端口跳跃 45000:50000 + Salamander 混淆)**：内置 Brutal 拥塞控制与 Salamander 双向混淆保护，有效免疫运营商对 UDP 流量的主动 QoS 限速；**开箱原生支持 45000:50000 动态端口跳跃 (Port Hopping)**，客户端每 30 秒自动随机变换外部端口，彻底消除单一固定端口被风控拉黑或 QoS 掐断的风险。
+   * **TUIC v5 (UDP/QUIC)**：原生标准 QUIC 协议，0-RTT 极速握手，底层集成 BBR 拥塞控制。
+   * **天然免疫主动探测**：服务器完全不开放任何 TCP 代理端口，任何针对 TCP 80/443 或随机高位 TCP 端口的主动探测直接被拒绝，安全性达到顶峰。
 2. **端到端智能带宽对齐 (Bandwidth Symmetrical Matching)**：
    * 安装时允许自定义或默认设置 VPS 上行（默认 500 Mbps）与下行（默认 50 Mbps）带宽上限。
    * **客户端与服务端数值严格对齐**：服务端的上传对应客户端的下载，服务端的下载对应客户端的上传，自动互为倒置匹配，确保 Hysteria 2 Brutal 算法发挥最大效益。
@@ -36,14 +35,13 @@
    * 支持一键打包**所有服务端/客户端配置、TLS 证书密钥、主程序二进制以及 Systemd 服务单元**至 `/var/backups/sing-box/`。
    * 无论重装系统、机器迁移还是意外误删，随时可通过交互式菜单**一键回滚恢复**！
 6. **真正的“零证书维护”体验**：
-   * Reality 借用大厂公网证书，完全不需要本地域名证书。
    * Hysteria 2 与 TUIC 采用本地 OpenSSL 生成的 **10 年长效高强度 ECC 证书**，无需申请 Let's Encrypt，**永远不需要担心 90 天证书过期断连**。
 7. **安全风控与端口防扫**：
    * 自动分配 **10000 ~ 60000 高位随机端口**，坚决不占用 80 和 443 敏感端口，有效规避全网主动探测。
-   * 全套高熵随机凭证（随机 UUID、随机 Reality 密钥对、随机 shortId、随机 Hy2/TUIC 密码）。
+   * 全套高熵随机凭证（随机 UUID、随机 Hy2 密码、随机 Salamander 混淆密钥、随机 TUIC 密码）。
 8. **原生底层优化与开箱即用**：
    * 原生写入系统内核参数，**自动激活 Linux BBR 拥塞控制**。
-   * 终端自动输出各协议通用分享链接（`vless://`, `hysteria2://`, `tuic://`）与手机导入二维码。
+   * 终端自动输出各协议通用分享链接（`hysteria2://`, `tuic://`）与手机导入二维码。
    * 自动生成电脑/手机端 Sing-box 客户端开箱即用的完整 `client_config.json` 配置文件。
    * **自动生成家庭旁路由专用的节点代码块 (`router_nodes.json`)**：可直接复制粘贴到 [singbox-mosdns-daed-router](https://github.com/luckyjamesriver/singbox-mosdns-daed-router) 旁路由的 `outbounds` 列表中，实现双向零门槛对接！
 
@@ -75,7 +73,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/luckyjamesriver/vps-sing-box
 ====================================================
 服务状态: 正在运行
 ----------------------------------------------------
-1. 安装 / 重新配置 Sing-box (4合1强力协议)
+1. 安装 / 重新配置 Sing-box (全 UDP/QUIC 强抗封锁矩阵)
 2. 查看 节点连接链接 与 二维码
 3. 查看并复制 客户端完整配置文件 (/etc/sing-box/client/config.json)
 4. 重启 Sing-box 服务

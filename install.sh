@@ -5,11 +5,11 @@
 # Repository: https://github.com/luckyjamesriver/vps-sing-box
 # License: MIT
 #
-# Supported Protocols (4-in-1):
-#   1. VLESS-Reality-Vision (TCP)
-#   2. VLESS-Reality-gRPC (TCP)
-#   3. Hysteria 2 (UDP)
-#   4. TUIC v5 (UDP)
+# Supported Protocols (Pure UDP/QUIC Matrix):
+#   1. Hysteria 2 (UDP, 原生端口跳跃 45000:50000 + Salamander 混淆)
+#   2. Hysteria 2 (UDP, 固定端口)
+#   3. TUIC v5 (UDP, 0-RTT 极速 QUIC + BBR)
+# 架构优势：零 TCP 监听端口，彻底免疫 GFW 入华 TCP SYN-ACK 精准阻断与主动探测
 # ==============================================================================
 
 set -e
@@ -264,17 +264,16 @@ generate_cert() {
 
 # --- Open Firewall Ports ---
 allow_ports() {
-    local tcp_ports=("$@")
+    local udp_ports=("$@")
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-        info "正在放行 UFW 防火墙端口..."
-        for p in "${tcp_ports[@]}"; do
-            ufw allow "${p}" >/dev/null 2>&1 || true
+        info "正在放行 UFW 防火墙 UDP 端口..."
+        for p in "${udp_ports[@]}"; do
+            ufw allow "${p}/udp" >/dev/null 2>&1 || true
         done
     fi
 
     if command -v iptables >/dev/null 2>&1; then
-        for p in "${tcp_ports[@]}"; do
-            iptables -I INPUT -p tcp --dport "${p}" -j ACCEPT >/dev/null 2>&1 || true
+        for p in "${udp_ports[@]}"; do
             iptables -I INPUT -p udp --dport "${p}" -j ACCEPT >/dev/null 2>&1 || true
         done
     fi
@@ -329,87 +328,51 @@ generate_configs() {
     local client_up_mbps="${server_down_mbps}"
     local client_down_mbps="${server_up_mbps}"
 
-    title "正在配置专属高强度凭证与端口"
+    title "正在配置专属高强度凭证与端口 (全 UDP/QUIC 强抗封锁矩阵)"
 
-    local port_reality_tcp=""
-    local port_reality_grpc=""
     local port_hy2=""
     local port_tuic=""
     local uuid=""
-    local private_key=""
-    local public_key=""
-    local short_id=""
     local hy2_password=""
     local tuic_password=""
     local salamander_pwd=""
-    local reality_sni="www.apple.com"
 
     if [[ "${is_reuse}" == "true" ]]; then
         info "正在读取已存在的凭证与端口..."
         if [[ -f "${INFO_FILE}" ]]; then
-            port_reality_tcp=$(jq -r '.port_reality_tcp // empty' "${INFO_FILE}")
-            port_reality_grpc=$(jq -r '.port_reality_grpc // empty' "${INFO_FILE}")
             port_hy2=$(jq -r '.port_hy2 // empty' "${INFO_FILE}")
             port_tuic=$(jq -r '.port_tuic // empty' "${INFO_FILE}")
             uuid=$(jq -r '.uuid // empty' "${INFO_FILE}")
-            private_key=$(jq -r '.private_key // empty' "${INFO_FILE}")
-            public_key=$(jq -r '.public_key // empty' "${INFO_FILE}")
-            short_id=$(jq -r '.short_id // empty' "${INFO_FILE}")
             hy2_password=$(jq -r '.hy2_password // empty' "${INFO_FILE}")
             tuic_password=$(jq -r '.tuic_password // empty' "${INFO_FILE}")
             salamander_pwd=$(jq -r '.salamander_pwd // empty' "${INFO_FILE}")
-            reality_sni=$(jq -r '.reality_sni // "www.apple.com"' "${INFO_FILE}")
         fi
 
         if [[ -f "${CONFIG_FILE}" ]]; then
-            [[ -z "${uuid}" ]] && uuid=$(jq -r '.inbounds[] | select(.type=="vless") | .users[0].uuid' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
-            [[ -z "${private_key}" ]] && private_key=$(jq -r '.inbounds[] | select(.type=="vless") | .tls.reality.private_key' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
-            [[ -z "${short_id}" ]] && short_id=$(jq -r '.inbounds[] | select(.type=="vless") | .tls.reality.short_id[-1]' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
-            [[ -z "${port_reality_tcp}" ]] && port_reality_tcp=$(jq -r '.inbounds[] | select(.tag=="VLESSReality" or .tag=="vless-reality-vision-in") | .listen_port' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
-            [[ -z "${port_reality_grpc}" ]] && port_reality_grpc=$(jq -r '.inbounds[] | select(.tag=="VLESSRealityGRPC" or .tag=="vless-reality-grpc-in") | .listen_port' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
             [[ -z "${port_hy2}" ]] && port_hy2=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
             [[ -z "${port_tuic}" ]] && port_tuic=$(jq -r '.inbounds[] | select(.type=="tuic") | .listen_port' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
             [[ -z "${hy2_password}" ]] && hy2_password=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .users[0].password' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+            [[ -z "${uuid}" ]] && uuid=$(jq -r '.inbounds[] | select(.type=="tuic" or .type=="vless") | .users[0].uuid' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
             [[ -z "${tuic_password}" ]] && tuic_password=$(jq -r '.inbounds[] | select(.type=="tuic") | .users[0].password' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
             [[ -z "${salamander_pwd}" ]] && salamander_pwd=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .obfs.password // empty' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
-        fi
-
-        if [[ -z "${public_key}" ]]; then
-            if [[ -f "${CLIENT_FILE}" ]]; then
-                public_key=$(jq -r '.outbounds[] | select(.type=="vless") | .tls.reality.public_key' "${CLIENT_FILE}" 2>/dev/null | head -n 1)
-            elif [[ -f "${CONFIG_DIR}/client_config.json" ]]; then
-                public_key=$(jq -r '.outbounds[] | select(.type=="vless") | .tls.reality.public_key' "${CONFIG_DIR}/client_config.json" 2>/dev/null | head -n 1)
-            fi
         fi
     fi
 
     # 兜底生成缺少的字段
-    [[ -z "${port_reality_tcp}" ]] && port_reality_tcp=$(get_random_port)
-    [[ -z "${port_reality_grpc}" ]] && port_reality_grpc=$(get_random_port)
     [[ -z "${port_hy2}" ]] && port_hy2=$(get_random_port)
     [[ -z "${port_tuic}" ]] && port_tuic=$(get_random_port)
-
     [[ -z "${uuid}" ]] && uuid=$("${BIN_PATH}" generate uuid)
-
-    if [[ -z "${private_key}" || -z "${public_key}" ]]; then
-        local reality_keypair
-        reality_keypair=$("${BIN_PATH}" generate reality-keypair)
-        private_key=$(echo "${reality_keypair}" | awk '/PrivateKey:/ {print $2}')
-        public_key=$(echo "${reality_keypair}" | awk '/PublicKey:/ {print $2}')
-    fi
-
-    [[ -z "${short_id}" ]] && short_id=$(openssl rand -hex 8)
     [[ -z "${hy2_password}" ]] && hy2_password=$(openssl rand -hex 16)
     [[ -z "${tuic_password}" ]] && tuic_password=$(openssl rand -hex 16)
     [[ -z "${salamander_pwd}" ]] && salamander_pwd=$(openssl rand -hex 8)
 
-    info "应用端口配置:"
-    echo -e "  - VLESS-Reality-Vision (TCP) : ${GREEN}${port_reality_tcp}${PLAIN}"
-    echo -e "  - VLESS-Reality-gRPC (TCP)   : ${GREEN}${port_reality_grpc}${PLAIN}"
-    echo -e "  - Hysteria 2         (UDP)   : ${GREEN}${port_hy2}${PLAIN}"
-    echo -e "  - TUIC v5            (UDP)   : ${GREEN}${port_tuic}${PLAIN}"
+    info "应用端口配置 (纯 UDP/QUIC 架构，零 TCP 监听):"
+    echo -e "  - Hysteria 2 动态跳跃端口 : ${GREEN}45000:50000/udp${PLAIN} -> ${GREEN}${port_hy2}${PLAIN}"
+    echo -e "  - Hysteria 2 固定端口 (UDP) : ${GREEN}${port_hy2}${PLAIN}"
+    echo -e "  - TUIC v5            (UDP) : ${GREEN}${port_tuic}${PLAIN}"
+    echo -e "  - TCP 代理监听端口          : ${YELLOW}无 (零 TCP 监听，彻底封死 TCP SYN-ACK 阻断与主动探测)${PLAIN}"
 
-    allow_ports "${port_reality_tcp}" "${port_reality_grpc}" "${port_hy2}" "${port_tuic}"
+    allow_ports "${port_hy2}" "${port_tuic}"
     configure_port_hopping "${port_hy2}"
 
     # 证书处理：如果证书已存在且匹配域名则复用，否则重新生成
@@ -419,7 +382,7 @@ generate_configs() {
         generate_cert "${domain}"
     fi
 
-    # 1. Server Configuration (No DNS block, VLESS-Reality-Vision native TCP, CN Geosite Rule-set Block)
+    # 1. Server Configuration (纯 UDP/QUIC 极简双核，CN Geosite Rule-set Block)
     cat > "${CONFIG_FILE}" <<EOF
 {
   "log": {
@@ -452,67 +415,6 @@ generate_configs() {
         ],
         "certificate_path": "${CERT_PEM}",
         "key_path": "${CERT_KEY}"
-      }
-    },
-    {
-      "type": "vless",
-      "tag": "VLESSReality",
-      "listen": "0.0.0.0",
-      "listen_port": ${port_reality_tcp},
-      "users": [
-        {
-          "name": "VLESS_Reality_Vision",
-          "uuid": "${uuid}",
-          "flow": "xtls-rprx-vision"
-        }
-      ],
-      "tls": {
-        "enabled": true,
-        "server_name": "${reality_sni}",
-        "reality": {
-          "enabled": true,
-          "handshake": {
-            "server": "${reality_sni}",
-            "server_port": 443
-          },
-          "private_key": "${private_key}",
-          "short_id": [
-            "",
-            "${short_id}"
-          ]
-        }
-      }
-    },
-    {
-      "type": "vless",
-      "tag": "VLESSRealityGRPC",
-      "listen": "0.0.0.0",
-      "listen_port": ${port_reality_grpc},
-      "users": [
-        {
-          "name": "VLESS_Reality_gRPC",
-          "uuid": "${uuid}"
-        }
-      ],
-      "tls": {
-        "enabled": true,
-        "server_name": "${reality_sni}",
-        "reality": {
-          "enabled": true,
-          "handshake": {
-            "server": "${reality_sni}",
-            "server_port": 443
-          },
-          "private_key": "${private_key}",
-          "short_id": [
-            "",
-            "${short_id}"
-          ]
-        }
-      },
-      "transport": {
-        "type": "grpc",
-        "service_name": "grpc-service"
       }
     },
     {
@@ -582,7 +484,7 @@ generate_configs() {
 }
 EOF
 
-    # 2. Client Complete Configuration (Matched Bandwidth Values, Hysteria2 UDP Brutal, Salamander OBFS)
+    # 2. Client Configuration (全 UDP/QUIC 矩阵, 客户端包含自动测速组与手动选择组)
     mkdir -p "${CLIENT_DIR}"
     cat > "${CLIENT_FILE}" <<EOF
 {
@@ -616,23 +518,19 @@ EOF
       "type": "selector",
       "tag": "select",
       "outbounds": [
-        "VLESS-Reality-Vision",
-        "VLESS-Reality-gRPC",
-        "Hysteria2",
         "Hysteria2-PortHopping",
+        "Hysteria2",
         "TUIC-v5",
         "auto"
       ],
-      "default": "VLESS-Reality-Vision"
+      "default": "Hysteria2-PortHopping"
     },
     {
       "type": "urltest",
       "tag": "auto",
       "outbounds": [
-        "VLESS-Reality-Vision",
-        "VLESS-Reality-gRPC",
-        "Hysteria2",
         "Hysteria2-PortHopping",
+        "Hysteria2",
         "TUIC-v5"
       ],
       "url": "https://cp.cloudflare.com/generate_204",
@@ -640,57 +538,13 @@ EOF
       "tolerance": 50
     },
     {
-      "type": "vless",
-      "tag": "VLESS-Reality-Vision",
-      "server": "${public_ip}",
-      "server_port": ${port_reality_tcp},
-      "uuid": "${uuid}",
-      "flow": "xtls-rprx-vision",
-      "tls": {
-        "enabled": true,
-        "server_name": "${reality_sni}",
-        "utls": {
-          "enabled": true,
-          "fingerprint": "chrome"
-        },
-        "reality": {
-          "enabled": true,
-          "public_key": "${public_key}",
-          "short_id": "${short_id}"
-        }
-      },
-      "packet_encoding": "xudp"
-    },
-    {
-      "type": "vless",
-      "tag": "VLESS-Reality-gRPC",
-      "server": "${public_ip}",
-      "server_port": ${port_reality_grpc},
-      "uuid": "${uuid}",
-      "network": "tcp",
-      "tls": {
-        "enabled": true,
-        "server_name": "${reality_sni}",
-        "utls": {
-          "enabled": true,
-          "fingerprint": "chrome"
-        },
-        "reality": {
-          "enabled": true,
-          "public_key": "${public_key}",
-          "short_id": "${short_id}"
-        }
-      },
-      "transport": {
-        "type": "grpc",
-        "service_name": "grpc-service"
-      }
-    },
-    {
       "type": "hysteria2",
-      "tag": "Hysteria2",
+      "tag": "Hysteria2-PortHopping",
       "server": "${public_ip}",
-      "server_port": ${port_hy2},
+      "server_ports": [
+        "45000:50000"
+      ],
+      "hop_interval": "30s",
       "up_mbps": ${client_up_mbps},
       "down_mbps": ${client_down_mbps},
       "password": "${hy2_password}",
@@ -709,12 +563,9 @@ EOF
     },
     {
       "type": "hysteria2",
-      "tag": "Hysteria2-PortHopping",
+      "tag": "Hysteria2",
       "server": "${public_ip}",
-      "server_ports": [
-        "45000:50000"
-      ],
-      "hop_interval": "30s",
+      "server_port": ${port_hy2},
       "up_mbps": ${client_up_mbps},
       "down_mbps": ${client_down_mbps},
       "password": "${hy2_password}",
@@ -844,28 +695,6 @@ EOF
       ],
       "insecure": true
     }
-  },
-  {
-    "type": "vless",
-    "tag": "VLESS-Reality-Vision",
-    "server": "${public_ip}",
-    "server_port": ${port_reality_tcp},
-    "uuid": "${uuid}",
-    "flow": "xtls-rprx-vision",
-    "tls": {
-      "enabled": true,
-      "server_name": "${reality_sni}",
-      "utls": {
-        "enabled": true,
-        "fingerprint": "chrome"
-      },
-      "reality": {
-        "enabled": true,
-        "public_key": "${public_key}",
-        "short_id": "${short_id}"
-      }
-    },
-    "packet_encoding": "xudp"
   }
 ]
 EOF
@@ -877,12 +706,6 @@ EOF
   "domain": "${domain}",
   "public_ip": "${public_ip}",
   "uuid": "${uuid}",
-  "reality_sni": "${reality_sni}",
-  "private_key": "${private_key}",
-  "public_key": "${public_key}",
-  "short_id": "${short_id}",
-  "port_reality_tcp": ${port_reality_tcp},
-  "port_reality_grpc": ${port_reality_grpc},
   "port_hy2": ${port_hy2},
   "hy2_port_range": "45000:50000",
   "hy2_password": "${hy2_password}",
@@ -923,18 +746,13 @@ show_nodes() {
         return 1
     fi
 
-    local domain public_ip uuid reality_sni public_key short_id
-    local port_reality_tcp port_reality_grpc port_hy2 hy2_password salamander_pwd port_tuic tuic_password
+    local domain public_ip uuid
+    local port_hy2 hy2_password salamander_pwd port_tuic tuic_password
     local server_up_mbps server_down_mbps client_up_mbps client_down_mbps
 
     domain=$(jq -r ".domain" "${INFO_FILE}")
     public_ip=$(jq -r ".public_ip" "${INFO_FILE}")
     uuid=$(jq -r ".uuid" "${INFO_FILE}")
-    reality_sni=$(jq -r ".reality_sni" "${INFO_FILE}")
-    public_key=$(jq -r ".public_key" "${INFO_FILE}")
-    short_id=$(jq -r ".short_id" "${INFO_FILE}")
-    port_reality_tcp=$(jq -r ".port_reality_tcp" "${INFO_FILE}")
-    port_reality_grpc=$(jq -r ".port_reality_grpc" "${INFO_FILE}")
     port_hy2=$(jq -r ".port_hy2" "${INFO_FILE}")
     hy2_password=$(jq -r ".hy2_password" "${INFO_FILE}")
     salamander_pwd=$(jq -r ".salamander_pwd" "${INFO_FILE}")
@@ -946,32 +764,30 @@ show_nodes() {
     client_down_mbps=$(jq -r ".client_down_mbps" "${INFO_FILE}")
 
     # Standard Share Links (Using Public IP for direct connection)
-    local uri_reality_tcp="vless://${uuid}@${public_ip}:${port_reality_tcp}?encryption=none&security=reality&sni=${reality_sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&flow=xtls-rprx-vision#VLESS-Reality-Vision"
-    local uri_reality_grpc="vless://${uuid}@${public_ip}:${port_reality_grpc}?encryption=none&security=reality&sni=${reality_sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=grpc&serviceName=grpc-service#VLESS-Reality-gRPC"
     local uri_hy2="hysteria2://${hy2_password}@${public_ip}:${port_hy2}/?insecure=1&sni=${domain}&obfs=salamander&obfs-password=${salamander_pwd}#Hysteria2"
     local uri_hy2_hop="hysteria2://${hy2_password}@${public_ip}:45000-50000/?insecure=1&sni=${domain}&obfs=salamander&obfs-password=${salamander_pwd}#Hysteria2-PortHopping"
     local uri_tuic="tuic://${uuid}:${tuic_password}@${public_ip}:${port_tuic}?congestion_control=bbr&alpn=h3&sni=${domain}&allow_insecure=1#TUIC-v5"
 
-    title "Sing-box 专属节点与连接链接"
+    title "Sing-box 专属节点与连接链接 (全 UDP/QUIC 强抗封锁矩阵)"
     echo -e "${YELLOW}绑定域名:${PLAIN} ${domain}  |  ${YELLOW}VPS 连接 IP:${PLAIN} ${public_ip}"
     echo -e "${YELLOW}带宽限量设置:${PLAIN} 服务端上行 ${server_up_mbps} Mbps, 下行 ${server_down_mbps} Mbps | 客户端对应上行 ${client_up_mbps} Mbps, 下行 ${client_down_mbps} Mbps"
-    echo -e "${YELLOW}客户端配置文件:${PLAIN} ${CLIENT_FILE}\n"
+    echo -e "${YELLOW}客户端配置文件:${PLAIN} ${CLIENT_FILE}
+"
 
-    echo -e "${GREEN}1. VLESS-Reality-Vision (TCP 原生零拷贝直通):${PLAIN}"
-    echo -e "   ${BLUE}${uri_reality_tcp}${PLAIN}\n"
+    echo -e "${GREEN}1. Hysteria 2 动态端口跳跃 (UDP, 45000-50000 防封/防QoS, 含混淆):${PLAIN}"
+    echo -e "   ${BLUE}${uri_hy2_hop}${PLAIN}
+"
 
-    echo -e "${GREEN}2. VLESS-Reality-gRPC (TCP 多路复用备用):${PLAIN}"
-    echo -e "   ${BLUE}${uri_reality_grpc}${PLAIN}\n"
+    echo -e "${GREEN}2. Hysteria 2 固定端口 (UDP, 晚高峰暴力加速, 含混淆):${PLAIN}"
+    echo -e "   ${BLUE}${uri_hy2}${PLAIN}
+"
 
-    echo -e "${GREEN}3. Hysteria 2 (UDP 晚高峰暴力加速, 含 Salamander 混淆):${PLAIN}"
-    echo -e "   • 固定端口: ${BLUE}${uri_hy2}${PLAIN}"
-    echo -e "   • 端口跳跃 (45000-50000 防封/防QoS): ${BLUE}${uri_hy2_hop}${PLAIN}\n"
+    echo -e "${GREEN}3. TUIC v5 (UDP, 0-RTT 极速 QUIC + BBR):${PLAIN}"
+    echo -e "   ${BLUE}${uri_tuic}${PLAIN}
+"
 
-    echo -e "${GREEN}4. TUIC v5 (UDP 0-RTT 极速 QUIC):${PLAIN}"
-    echo -e "   ${BLUE}${uri_tuic}${PLAIN}\n"
-
-    title "VLESS-Reality-Vision 二维码 (手机扫码即可导入)"
-    qrencode -t ANSIUTF8 "${uri_reality_tcp}" || true
+    title "Hysteria 2 动态端口跳跃 二维码 (手机扫码即可导入)"
+    qrencode -t ANSIUTF8 "${uri_hy2_hop}" 2>/dev/null || qrencode -t ANSIUTF8 "${uri_hy2}" || true
 
     echo -e "----------------------------------------------------"
     echo -e "${CYAN}【配套家庭软路由联动 (singbox-mosdns-daed-router)】:${PLAIN}"
@@ -981,7 +797,8 @@ show_nodes() {
     echo -e "  - 复制文件内的 JSON 节点直接粘贴进旁路由的 ${CYAN}/etc/sing-box/config.json${PLAIN} 即可！"
     echo -e "----------------------------------------------------"
 
-    echo -e "\n${YELLOW}提示:${PLAIN} 随时输入快捷管理命令 ${GREEN}vps${PLAIN} 即可唤出管理菜单！"
+    echo -e "
+${YELLOW}提示:${PLAIN} 随时输入快捷管理命令 ${GREEN}vps${PLAIN} 即可唤出管理菜单！"
 }
 
 # --- Show Client Config JSON ---
@@ -1071,7 +888,7 @@ install_flow() {
         old_up=$(jq -r '.server_up_mbps // 500' "${INFO_FILE}" 2>/dev/null)
         old_down=$(jq -r '.server_down_mbps // 50' "${INFO_FILE}" 2>/dev/null)
     elif [[ -f "${CONFIG_FILE}" ]]; then
-        old_uuid=$(jq -r '.inbounds[] | select(.type=="vless") | .users[0].uuid // empty' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
+        old_uuid=$(jq -r '.inbounds[] | select(.type=="tuic" or .type=="vless") | .users[0].uuid // empty' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
         user_domain=$(jq -r '.inbounds[] | select(.type=="hysteria2" or .type=="tuic") | .tls.server_name // empty' "${CONFIG_FILE}" 2>/dev/null | head -n 1)
     fi
 
@@ -1426,7 +1243,7 @@ menu() {
     fi
 
     echo -e "----------------------------------------------------"
-    echo -e "${GREEN}1.${PLAIN} 安装 / 重新配置 Sing-box (4合1强力协议)"
+    echo -e "${GREEN}1.${PLAIN} 安装 / 重新配置 Sing-box (全 UDP/QUIC 强抗封锁矩阵)"
     echo -e "${GREEN}2.${PLAIN} 查看 节点连接链接 与 二维码"
     echo -e "${GREEN}3.${PLAIN} 查看并复制 客户端配置文件 (单机客户端 / 旁路由节点代码块)"
     echo -e "${GREEN}4.${PLAIN} 重启 Sing-box 服务"
